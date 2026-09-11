@@ -8,7 +8,164 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+function analyzeVehicleReading(data) {
+  const alerts = [];
 
+  const temperature = Number(data.engineTemperature);
+  const battery = Number(data.batteryVoltage);
+  const fuel = Number(data.fuelLevel);
+  const vibration = Number(data.vibration);
+
+  // ENGINE TEMPERATURE
+  if (temperature >= 105) {
+    alerts.push({
+      type: "ENGINE_TEMPERATURE",
+      severity: "CRITICAL",
+      message: "Engine temperature is critically high",
+      value: temperature
+    });
+  } else if (temperature >= 95) {
+    alerts.push({
+      type: "ENGINE_TEMPERATURE",
+      severity: "WARNING",
+      message: "Engine temperature is higher than normal",
+      value: temperature
+    });
+  }
+
+  // BATTERY
+  if (battery <= 11.5) {
+    alerts.push({
+      type: "BATTERY",
+      severity: "CRITICAL",
+      message: "Battery voltage is critically low",
+      value: battery
+    });
+  } else if (battery < 12) {
+    alerts.push({
+      type: "BATTERY",
+      severity: "WARNING",
+      message: "Battery voltage is low",
+      value: battery
+    });
+  }
+
+  // FUEL
+  if (fuel <= 10) {
+    alerts.push({
+      type: "FUEL",
+      severity: "CRITICAL",
+      message: "Fuel level is critically low",
+      value: fuel
+    });
+  } else if (fuel <= 20) {
+    alerts.push({
+      type: "FUEL",
+      severity: "WARNING",
+      message: "Fuel level is low",
+      value: fuel
+    });
+  }
+
+  // VIBRATION
+  if (vibration >= 4) {
+    alerts.push({
+      type: "VIBRATION",
+      severity: "CRITICAL",
+      message: "Severe abnormal vibration detected",
+      value: vibration
+    });
+  } else if (vibration >= 2.5) {
+    alerts.push({
+      type: "VIBRATION",
+      severity: "WARNING",
+      message: "Abnormal vibration detected",
+      value: vibration
+    });
+  }
+
+  return alerts;
+}
+async function updateVehicleAlerts(ambulanceId, reading) {
+  const currentAlerts = analyzeVehicleReading(reading);
+
+  const activeResult = await pool.query(
+    `
+    SELECT *
+    FROM vehicle_alerts
+    WHERE ambulance_id = $1
+      AND status = 'ACTIVE'
+    `,
+    [ambulanceId]
+  );
+
+  const existingAlerts = activeResult.rows;
+
+  // CREATE OR UPDATE CURRENT ALERTS
+  for (const alert of currentAlerts) {
+    const existing = existingAlerts.find(
+      (item) => item.alert_type === alert.type
+    );
+
+    if (existing) {
+      await pool.query(
+        `
+        UPDATE vehicle_alerts
+        SET severity = $1,
+            message = $2,
+            sensor_value = $3
+        WHERE id = $4
+        `,
+        [
+          alert.severity,
+          alert.message,
+          alert.value,
+          existing.id
+        ]
+      );
+    } else {
+      await pool.query(
+        `
+        INSERT INTO vehicle_alerts
+        (
+          ambulance_id,
+          alert_type,
+          severity,
+          message,
+          sensor_value
+        )
+        VALUES ($1,$2,$3,$4,$5)
+        `,
+        [
+          ambulanceId,
+          alert.type,
+          alert.severity,
+          alert.message,
+          alert.value
+        ]
+      );
+    }
+  }
+
+  // RESOLVE ALERTS THAT ARE NO LONGER PRESENT
+  for (const existing of existingAlerts) {
+    const stillActive = currentAlerts.some(
+      (alert) => alert.type === existing.alert_type
+    );
+
+    if (!stillActive) {
+      await pool.query(
+        `
+        UPDATE vehicle_alerts
+        SET status = 'RESOLVED',
+            resolved_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+        `,
+        [existing.id]
+      );
+    }
+  }
+}
 app.get("/", (req, res) => {
   res.json({
     message: "Smart Ambulance API is running"
@@ -77,7 +234,12 @@ app.post("/api/readings", async (req, res) => {
         vibration
       ]
     );
-
+await updateVehicleAlerts(ambulanceId, {
+  engineTemperature,
+  batteryVoltage,
+  fuelLevel,
+  vibration
+});
     res.status(201).json({
       message: "Vehicle reading saved successfully",
       reading: result.rows[0]
