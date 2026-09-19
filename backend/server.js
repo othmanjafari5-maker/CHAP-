@@ -253,7 +253,42 @@ await updateVehicleAlerts(ambulanceId, {
     });
   }
 });
+app.get("/api/ambulances/:id/history", async (req, res) => {
+  try {
+    const ambulanceId = req.params.id;
 
+    let limit = Number(req.query.limit) || 100;
+
+    if (limit > 500) {
+      limit = 500;
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        latitude,
+        longitude,
+        speed,
+        created_at
+      FROM vehicle_readings
+      WHERE ambulance_id = $1
+      ORDER BY created_at DESC
+      LIMIT $2
+      `,
+      [ambulanceId, limit]
+    );
+
+    // Reverse so oldest coordinate comes first
+    res.json(result.rows.reverse());
+
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      message: "Failed to get ambulance route history"
+    });
+  }
+});
 const PORT = process.env.PORT || 5000;
 app.get("/api/ambulances/:id/latest", async (req, res) => {
   try {

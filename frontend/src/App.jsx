@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import LiveAmbulanceMap from "./components/LiveAmbulanceMap";
 import "./App.css";
 
 function App() {
@@ -256,7 +257,7 @@ function App() {
           </div>
 
         </div>
-
+<LiveAmbulanceMap ambulance={ambulance} />
         {/* ALERTS */}
 
         <div className="alerts-section">
