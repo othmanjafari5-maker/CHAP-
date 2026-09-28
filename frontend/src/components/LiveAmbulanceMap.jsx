@@ -1,3 +1,4 @@
+import { API_URL, validGPS } from '../api';
 import { useEffect, useState } from "react";
 
 import {
@@ -18,24 +19,20 @@ const ambulanceIcon = L.divIcon({
 
   html: `
     <div class="ambulance-marker-inner">
-      🚑
+      ✚
     </div>
   `,
 
   iconSize: [45, 45],
-
   iconAnchor: [22, 22],
-
   popupAnchor: [0, -20]
 });
 
 function MoveMap({ latitude, longitude }) {
-
   const map = useMap();
 
   useEffect(() => {
-
-    if (!latitude || !longitude) return;
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
 
     map.panTo(
       [Number(latitude), Number(longitude)],
@@ -44,67 +41,57 @@ function MoveMap({ latitude, longitude }) {
         duration: 1
       }
     );
-
   }, [latitude, longitude, map]);
 
   return null;
 }
 
 function LiveAmbulanceMap({ ambulance }) {
-
-  const [route, setRoute] = useState([]);
-
-  const fetchRoute = async () => {
-
-    try {
-
-      const response = await fetch(
-        "http://localhost:5000/api/ambulances/1/history?limit=100"
-      );
-
-      if (!response.ok) {
-        throw new Error("Failed to load route");
-      }
-
-      const data = await response.json();
-
-      const coordinates = data
-        .filter(
-          (item) =>
-            item.latitude &&
-            item.longitude
-        )
-        .map((item) => [
-          Number(item.latitude),
-          Number(item.longitude)
-        ]);
-
-      setRoute(coordinates);
-
-    } catch (error) {
-
-      console.error(
-        "Route loading error:",
-        error
-      );
-
-    }
-  };
+  const [routeData, setRouteData] = useState({ id: null, points: [] });
+  const route = routeData.id === ambulance?.id ? routeData.points : [];
 
   useEffect(() => {
+    if (!ambulance?.id) return;
 
-    fetchRoute();
+    const controller = new AbortController();
+    let timer;
+    const fetchAmbulanceRoute = async () => {
+      try {
+        const response = await fetch(
+          `${API_URL}/api/ambulances/${ambulance.id}/history?limit=100`, { signal: controller.signal }
+        );
 
-    const interval =
-      setInterval(fetchRoute, 5000);
+        if (!response.ok) {
+          throw new Error("Failed to load route");
+        }
 
-    return () =>
-      clearInterval(interval);
+        const data = await response.json();
 
-  }, []);
+        const coordinates = data
+          .filter(
+            (item) =>
+              validGPS(item)
+          )
+          .map((item) => [
+            Number(item.latitude),
+            Number(item.longitude)
+          ]);
+
+        if (!controller.signal.aborted) setRouteData({ id: ambulance.id, points: coordinates });
+
+      } catch (error) {
+        if (error.name !== "AbortError") console.error("Route loading error:", error);
+      } finally {
+        if (!controller.signal.aborted) timer = setTimeout(fetchAmbulanceRoute, 5000);
+      }
+    };
+
+    fetchAmbulanceRoute();
+    return () => { controller.abort(); clearTimeout(timer); };
+
+  }, [ambulance?.id]);
 
   if (!ambulance) {
-
     return (
       <p>
         Waiting for ambulance GPS...
@@ -119,10 +106,8 @@ function LiveAmbulanceMap({ ambulance }) {
     Number(ambulance.longitude);
 
   if (
-    Number.isNaN(latitude) ||
-    Number.isNaN(longitude)
+    !validGPS(ambulance)
   ) {
-
     return (
       <p>
         Invalid GPS coordinates.
@@ -136,26 +121,23 @@ function LiveAmbulanceMap({ ambulance }) {
   ];
 
   return (
-
     <div className="map-section">
 
       <div className="map-heading">
 
         <div>
-
           <h2>
-            Live Ambulance Map
+            Vehicle location
           </h2>
 
           <p>
-            Current location and travelled route of{" "}
+            Latest known position and travelled route of{" "}
             {ambulance.ambulance_code}
           </p>
-
         </div>
 
         <span className="live-indicator">
-          ● LIVE
+          {ambulance.connection?.status || "UNKNOWN"}
         </span>
 
       </div>
@@ -173,12 +155,11 @@ function LiveAmbulanceMap({ ambulance }) {
         />
 
         {route.length > 1 && (
-
           <Polyline
             positions={route}
-            weight={5}
+            weight={4}
+            pathOptions={{ color: "#f54242" }}
           />
-
         )}
 
         <Marker
@@ -199,30 +180,23 @@ function LiveAmbulanceMap({ ambulance }) {
             <br />
             <br />
 
-            Speed:
-            {" "}
-            {ambulance.speed}
-            {" "}km/h
+            Speed:{" "}
+            {ambulance.speed} km/h
 
             <br />
 
-            Status:
-            {" "}
+            Status:{" "}
             {ambulance.status}
 
             <br />
 
-            Engine:
-            {" "}
-            {ambulance.engine_temperature}
-            {" "}°C
+            Engine:{" "}
+            {ambulance.engine_temperature} °C
 
             <br />
 
-            Fuel:
-            {" "}
-            {ambulance.fuel_level}
-            %
+            Fuel:{" "}
+            {ambulance.fuel_level}%
 
           </Popup>
 
@@ -238,7 +212,6 @@ function LiveAmbulanceMap({ ambulance }) {
       <div className="gps-details">
 
         <div>
-
           <span>
             Latitude
           </span>
@@ -246,11 +219,9 @@ function LiveAmbulanceMap({ ambulance }) {
           <strong>
             {latitude.toFixed(6)}
           </strong>
-
         </div>
 
         <div>
-
           <span>
             Longitude
           </span>
@@ -258,11 +229,9 @@ function LiveAmbulanceMap({ ambulance }) {
           <strong>
             {longitude.toFixed(6)}
           </strong>
-
         </div>
 
         <div>
-
           <span>
             Speed
           </span>
@@ -270,11 +239,9 @@ function LiveAmbulanceMap({ ambulance }) {
           <strong>
             {ambulance.speed} km/h
           </strong>
-
         </div>
 
         <div>
-
           <span>
             Route Points
           </span>
@@ -282,13 +249,11 @@ function LiveAmbulanceMap({ ambulance }) {
           <strong>
             {route.length}
           </strong>
-
         </div>
 
       </div>
 
     </div>
-
   );
 }
 

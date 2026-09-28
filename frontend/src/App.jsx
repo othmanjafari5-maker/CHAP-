@@ -1,296 +1,56 @@
-import { useEffect, useState } from "react";
-import LiveAmbulanceMap from "./components/LiveAmbulanceMap";
-import "./App.css";
+import { useEffect, useState } from 'react';
+import FleetMap from './components/FleetMap';
+import LiveAmbulanceMap from './components/LiveAmbulanceMap';
+import TelemetryTrends from './components/TelemetryTrends';
+import MaintenancePanel from './components/MaintenancePanel';
+import CoverageSettings from './components/CoverageSettings';
+import { request, freshness } from './api';
+import './App.css';
 
-function App() {
-  const [ambulance, setAmbulance] = useState(null);
-  const [error, setError] = useState("");
-
-  const fetchAmbulance = async () => {
-    try {
-      const response = await fetch(
-        "http://localhost:5000/api/ambulances/1/latest"
-      );
-
-      if (!response.ok) {
-        throw new Error("Unable to get ambulance data");
-      }
-
-      const data = await response.json();
-
-      setAmbulance(data);
-      setError("");
-    } catch (err) {
-      console.error(err);
-      setError("Cannot connect to Smart Ambulance backend");
-    }
-  };
-
+const time = value => value ? new Date(value).toLocaleString() : 'Never received';
+export default function App() {
+  const [fleet, setFleet] = useState([]), [selectedId, setSelectedId] = useState(null);
+  const [coverage, setCoverage] = useState([]), [forecast, setForecast] = useState(null);
+  const [error, setError] = useState(''), [loading, setLoading] = useState(true);
+  const [now, setNow] = useState(() => Date.now()), [refresh, setRefresh] = useState(0);
+  const [dispatch, setDispatch] = useState(null), [dispatchError, setDispatchError] = useState(''), [ranking, setRanking] = useState(false);
   useEffect(() => {
-    fetchAmbulance();
-
-    const interval = setInterval(fetchAmbulance, 5000);
-
-    return () => clearInterval(interval);
+    const clock = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(clock);
   }, []);
-
-  // Prototype rule-based vehicle health analysis
-  const analyzeVehicleHealth = (data) => {
-    if (!data) {
-      return {
-        status: "UNKNOWN",
-        level: "unknown",
-        alerts: []
-      };
-    }
-
-    const temperature = Number(data.engine_temperature);
-    const battery = Number(data.battery_voltage);
-    const fuel = Number(data.fuel_level);
-    const vibration = Number(data.vibration);
-
-    const alerts = [];
-    let criticalCount = 0;
-    let warningCount = 0;
-
-    // Engine temperature
-    if (temperature >= 105) {
-      alerts.push({
-        type: "critical",
-        message: "Engine temperature is critically high"
-      });
-      criticalCount++;
-    } else if (temperature >= 95) {
-      alerts.push({
-        type: "warning",
-        message: "Engine temperature is higher than normal"
-      });
-      warningCount++;
-    }
-
-    // Battery
-    if (battery <= 11.5) {
-      alerts.push({
-        type: "critical",
-        message: "Battery voltage is critically low"
-      });
-      criticalCount++;
-    } else if (battery < 12.0) {
-      alerts.push({
-        type: "warning",
-        message: "Battery voltage is low"
-      });
-      warningCount++;
-    }
-
-    // Fuel
-    if (fuel <= 10) {
-      alerts.push({
-        type: "critical",
-        message: "Fuel level is critically low"
-      });
-      criticalCount++;
-    } else if (fuel <= 20) {
-      alerts.push({
-        type: "warning",
-        message: "Fuel level is low"
-      });
-      warningCount++;
-    }
-
-    // Vibration
-    if (vibration >= 4) {
-      alerts.push({
-        type: "critical",
-        message: "Severe abnormal vibration detected"
-      });
-      criticalCount++;
-    } else if (vibration >= 2.5) {
-      alerts.push({
-        type: "warning",
-        message: "Abnormal vibration detected"
-      });
-      warningCount++;
-    }
-
-    if (criticalCount > 0) {
-      return {
-        status: "CRITICAL",
-        level: "critical",
-        alerts
-      };
-    }
-
-    if (warningCount > 0) {
-      return {
-        status: "WARNING",
-        level: "warning",
-        alerts
-      };
-    }
-
-    return {
-      status: "NORMAL",
-      level: "normal",
-      alerts: []
+  useEffect(() => {
+    const controller = new AbortController(); let timer;
+    const poll = async () => {
+      try {
+        const [vehicles, areas, availability] = await Promise.all(['/api/ambulances','/api/fleet/coverage','/api/fleet/availability'].map(path => request(path,{signal:controller.signal})));
+        if (!controller.signal.aborted) { setFleet(vehicles); setCoverage(areas); setForecast(availability); setError(''); }
+      } catch(e) { if(e.name !== 'AbortError') setError(e.message); }
+      finally { if(!controller.signal.aborted) {setLoading(false); timer=setTimeout(poll,5000);} }
     };
-  };
-
-  if (error) {
-    return (
-      <div className="container">
-        <h1>Smart Ambulance Control Center</h1>
-        <p className="error">{error}</p>
-      </div>
-    );
+    poll(); return () => {controller.abort();clearTimeout(timer);};
+  }, [refresh]);
+  const vehicles = fleet.map(a => {
+    const state=freshness(a.recorded_at,now);
+    return {...a,connection:{...a.connection,status:state},dispatch:{...a.dispatch,eligible:!error&&state==='LIVE'&&a.dispatch.eligible}};
+  });
+  const selected=vehicles.find(a=>a.id===selectedId)||vehicles[0];
+  async function recommend(event) {
+    event.preventDefault();setRanking(true);setDispatchError('');setDispatch(null);
+    const form=new FormData(event.currentTarget);
+    try {setDispatch(await request('/api/dispatch/recommendations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({latitude:Number(form.get('latitude')),longitude:Number(form.get('longitude'))})}));}
+    catch(e){setDispatchError(e.message);} finally {setRanking(false);}
   }
-
-  if (!ambulance) {
-    return (
-      <div className="container">
-        <h1> Smart Ambulance Control Center</h1>
-        <p>Loading ambulance data...</p>
-      </div>
-    );
-  }
-
-  const vehicleHealth = analyzeVehicleHealth(ambulance);
-
-  return (
-    <div className="container">
-
-      <h1>Smart Ambulance Control Center</h1>
-
-      <div className="ambulance-card">
-
-        <div className="header">
-
-          <div>
-            <h2>{ambulance.ambulance_code}</h2>
-            <p>{ambulance.registration_number}</p>
-          </div>
-
-          <span className="status">
-            {ambulance.status}
-          </span>
-
-        </div>
-
-        <p>
-          <strong>Hospital:</strong>{" "}
-          {ambulance.hospital_name}
-        </p>
-
-        {/* VEHICLE HEALTH */}
-
-        <div className={`health-box ${vehicleHealth.level}`}>
-
-          <div>
-            <span className="health-label">
-              Vehicle Health
-            </span>
-
-            <h2>
-              {vehicleHealth.status === "NORMAL" && "🟢 "}
-              {vehicleHealth.status === "WARNING" && "🟡 "}
-              {vehicleHealth.status === "CRITICAL" && "🔴 "}
-
-              {vehicleHealth.status}
-            </h2>
-          </div>
-
-          <div className="health-description">
-            {vehicleHealth.status === "NORMAL" &&
-              "All monitored vehicle conditions are within the prototype normal range."}
-
-            {vehicleHealth.status === "WARNING" &&
-              "One or more vehicle readings require attention."}
-
-            {vehicleHealth.status === "CRITICAL" &&
-              "Immediate vehicle inspection may be required."}
-          </div>
-
-        </div>
-
-        {/* SENSOR DATA */}
-
-        <div className="data-grid">
-
-          <div className="data-card">
-            <h3> Location</h3>
-            <p className="small-data">
-              Lat: {ambulance.latitude}
-            </p>
-            <p className="small-data">
-              Long: {ambulance.longitude}
-            </p>
-          </div>
-
-          <div className="data-card">
-            <h3> Speed</h3>
-            <p>{ambulance.speed} km/h</p>
-          </div>
-
-          <div className="data-card">
-            <h3> RPM</h3>
-            <p>{ambulance.rpm}</p>
-          </div>
-
-          <div className="data-card">
-            <h3> Engine Temperature</h3>
-            <p>{ambulance.engine_temperature} °C</p>
-          </div>
-
-          <div className="data-card">
-            <h3> Battery</h3>
-            <p>{ambulance.battery_voltage} V</p>
-          </div>
-
-          <div className="data-card">
-            <h3> Fuel</h3>
-            <p>{ambulance.fuel_level}%</p>
-          </div>
-
-          <div className="data-card">
-            <h3>📳 Vibration</h3>
-            <p>{ambulance.vibration}</p>
-          </div>
-
-        </div>
-<LiveAmbulanceMap ambulance={ambulance} />
-        {/* ALERTS */}
-
-        <div className="alerts-section">
-
-          <h2>Vehicle Alerts</h2>
-
-          {vehicleHealth.alerts.length === 0 ? (
-            <div className="no-alert">
-              ✅ No abnormal vehicle conditions detected.
-            </div>
-          ) : (
-            vehicleHealth.alerts.map((alert, index) => (
-              <div
-                key={index}
-                className={`alert ${alert.type}`}
-              >
-                {alert.type === "critical" ? "🚨" : "⚠️"}{" "}
-                {alert.message}
-              </div>
-            ))
-          )}
-
-        </div>
-
-        <p className="updated">
-          Last Update:{" "}
-          {new Date(ambulance.created_at).toLocaleString()}
-        </p>
-
-      </div>
-
-    </div>
-  );
+  return <div className="app-shell">
+    <aside className="sidebar"><a className="brand" href="#overview"><span className="brand-mark">✚</span><span>CHAP<small>AMBULANCE INTELLIGENCE</small></span></a><nav><a href="#overview">Overview</a><a href="#fleet">Ambulance fleet</a><a href="#vehicle">Vehicle intelligence</a><a href="#dispatch">Dispatch support</a><a href="#coverage">Coverage & planning</a></nav><div className="sidebar-note"><span className="pulse-dot"/> Operational readiness<p>Know which vehicles are ready to respond.</p></div></aside>
+    <main className="main-content" id="overview"><header className="page-header"><div><p className="eyebrow">FLEET OPERATIONS</p><h1>Ambulance control center</h1><p>Vehicle health, readiness and service coverage in one place.</p></div><span className="badge">{error?'CONNECTION LOST':'UPDATES EVERY 5s'}</span></header>
+      {error&&<div className="notice" role="alert">Backend unavailable: {error}. Displayed readings are last known values; recommendations and counts may be outdated.</div>}
+      <div className="summary-grid">{[['Total ambulances',vehicles.length],['Dispatch ready',vehicles.filter(a=>a.dispatch.eligible).length],['Inspection required',vehicles.filter(a=>a.safety.inspectionRequired).length],['Delayed / offline',vehicles.filter(a=>a.connection.status!=='LIVE').length]].map(([label,value])=><div className="summary-card" key={label}><span>{label}</span><strong>{value}</strong></div>)}</div>
+      {loading&&<p role="status">Loading fleet…</p>}{!loading&&!vehicles.length&&<div className="panel">No ambulances found. Run the backend seed command to create the demo fleet.</div>}
+      <section id="fleet"><div className="section-heading"><div><p className="eyebrow">LIVE OPERATIONS</p><h2>Ambulance fleet</h2></div><span>{vehicles.length} registered vehicles</span></div><div className="fleet-grid">{vehicles.map(a=><button type="button" key={a.id} className={`fleet-card ${selected?.id===a.id?'selected':''}`} onClick={()=>setSelectedId(a.id)}><div className="fleet-card-top"><h3>{a.ambulance_code}</h3><span className={`badge ${a.connection.status!=='LIVE'?'attention':''}`}>{a.connection.status}</span></div><p>{a.hospital_name||'Unassigned hospital'}</p><div className="readiness-value">{a.readiness.score??'—'}<small>/ 100 readiness</small></div><div className="score-track"><span style={{width:`${a.readiness.score||0}%`}}/></div><p className="card-label">{a.connection.status==='LIVE'?a.readiness.label:'TELEMETRY NOT CURRENT'}</p><div className="card-meta"><span>{a.effective_status}</span><strong>{a.dispatch.eligible?'Dispatch ready':'Not eligible'}</strong></div><small>Last observation: {time(a.recorded_at)}</small></button>)}</div><FleetMap ambulances={vehicles} onSelect={setSelectedId}/></section>
+      {selected&&<section id="vehicle" className="vehicle-section"><div className="section-heading"><div><p className="eyebrow">VEHICLE INTELLIGENCE</p><h2>{selected.ambulance_code} <span className="muted">/ {selected.registration_number}</span></h2></div><span className="badge">{selected.effective_status}</span></div><div className="intelligence-grid"><div className="panel"><h3>Readiness assessment</h3><strong className="large-number">{selected.readiness.score??'—'}<small> / 100</small></strong><p>{selected.connection.status==='LIVE'?selected.readiness.label:'Current readiness unavailable — stale telemetry'}</p><ul className="reason-list">{selected.readiness.reasons.map(r=><li key={r}>{r}</li>)}</ul>{selected.safety.inspectionRequired&&<div className="notice">Inspection required: {selected.safety.reason}</div>}<small>Last contact: {time(selected.connection.lastSeenAt)}</small></div><div className="panel"><h3>Failure risk</h3><strong className="large-number risk-label">{selected.connection.status==='LIVE'?selected.risk.level:'UNKNOWN'}</strong><p>{selected.risk.source}</p><ul className="reason-list">{selected.risk.reasons.map(r=><li key={r}>{r}</li>)}</ul><small>Seven-day demo estimate. Synthetic model output is not a validated failure probability. Unknown risk does not override mechanical safety checks.</small></div></div>
+      <div className="data-grid">{[['Speed','speed','km/h'],['Engine speed','rpm','RPM'],['Temperature','engine_temperature','°C'],['Battery','battery_voltage','V'],['Fuel','fuel_level','%'],['Vibration','vibration','sensor units'],['Odometer','odometer_km','km']].map(([label,key,unit])=><div className="data-card" key={key}><span>{label}</span><strong>{selected[key]??'—'} <small>{unit}</small></strong></div>)}</div>
+      <TelemetryTrends key={selected.id} ambulanceId={selected.id}/><LiveAmbulanceMap ambulance={selected}/><MaintenancePanel key={`maintenance-${selected.id}`} ambulance={selected} onChange={()=>setRefresh(v=>v+1)}/></section>}
+      <section id="dispatch" className="panel"><p className="eyebrow">READINESS FIRST</p><h2>Dispatch recommendation</h2><p>Enter the incident location to rank eligible vehicles by health, fuel, risk and approximate distance.</p><form className="inline-form" onSubmit={recommend}><label>Incident latitude<input name="latitude" type="number" min="-90" max="90" step="any" defaultValue="-6.163" required/></label><label>Incident longitude<input name="longitude" type="number" min="-180" max="180" step="any" defaultValue="35.7516" required/></label><button className="primary-button" disabled={ranking||!!error}>{ranking?'Checking fleet…':'Find suitable ambulance'}</button></form>{dispatchError&&<p role="alert" className="error">{dispatchError}</p>}{dispatch&&<div><p><strong>{dispatch.message}</strong> · Checked {time(dispatch.evaluatedAt)}</p><small>{now-new Date(dispatch.evaluatedAt).getTime()>15000?"Recommendation is stale. Run the check again. ":""}{dispatch.distanceType}. Recheck before assignment; this does not dispatch a vehicle.</small>{dispatch.candidates.map((a,i)=><div className="result-row" key={a.id}><strong>#{i+1} {a.code}</strong><span>{a.distanceKm} km away</span><span>{a.readiness}% ready · Risk {a.risk}</span></div>)}<details><summary>Excluded vehicles ({dispatch.excluded.length})</summary>{dispatch.excluded.map(a=><p key={a.id}><strong>{a.code}:</strong> {a.reasons.join('; ')||'Readiness requirements not met'}</p>)}</details></div>}</section>
+      <section id="coverage"><div className="section-heading"><div><p className="eyebrow">SERVICE RESILIENCE</p><h2>Coverage & availability</h2></div></div><div className="coverage-grid">{coverage.map(g=><div className="panel" key={g.hospital}><span className={`badge ${g.risk!=='ADEQUATE'?'attention':''}`}>{g.risk}</span><h3>{g.hospital}</h3><strong className="large-number">{g.ready}<small> / {g.total} ready</small></strong><p>{g.unavailable} unavailable · {g.highRisk} high risk</p><small>Minimum coverage: {g.minimum}. {g.ready===g.minimum?'One more loss would leave coverage below minimum.':''}</small><CoverageSettings hospital={g.hospital} minimum={g.minimum} onChange={()=>setRefresh(v=>v+1)}/></div>)}</div>{forecast&&<div className="panel"><h3>Likely fleet availability</h3><div className="forecast-grid">{forecast.horizons.map(h=><div key={h.days}><span>{h.days===0?'Today':`Next ${h.days} days`}</span><strong>{h.expected}<small> / {h.total}</small></strong><p>{h.serviceDue} service due · {h.unknown} uncertain</p></div>)}</div><small>{forecast.method}</small></div>}</section><footer>CHAP · Ambulance operational readiness</footer>
+    </main></div>;
 }
-
-export default App;

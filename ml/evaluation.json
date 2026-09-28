@@ -1,0 +1,14 @@
+{
+  "data": "SYNTHETIC DEMO ONLY",
+  "split": "450 training / 150 held-out independent vehicle scenarios",
+  "truePositive": 24,
+  "trueNegative": 95,
+  "falsePositive": 12,
+  "falseNegative": 19,
+  "precision": 0.6666666666666666,
+  "recall": 0.5581395348837209,
+  "accuracy": 0.7933333333333333,
+  "alwaysHealthyBaselineAccuracy": 0.7133333333333334,
+  "positiveTestOutcomes": 43,
+  "limitations": "Synthetic scenario summaries, not real longitudinal vehicle validation. Rates are uncalibrated. Never use this model as evidence of dispatch safety."
+}

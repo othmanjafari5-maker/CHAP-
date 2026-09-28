@@ -1,17 +1,69 @@
-const API_URL = "http://localhost:5000/api/readings";
+const fs = require('node:fs');
+const path = require('node:path');
+const { randomUUID } = require('node:crypto');
+const API_URL = process.env.API_URL || "http://localhost:5000";
+const QUEUE_FILE = process.env.QUEUE_FILE || path.join(__dirname, 'pending-readings.json');
+let pending = [];
+try { pending = JSON.parse(fs.readFileSync(QUEUE_FILE, 'utf8')); }
+catch (error) { if (error.code !== 'ENOENT') throw new Error(`Cannot read durable queue: ${error.message}`); }
+function persistQueue() {
+  fs.writeFileSync(`${QUEUE_FILE}.tmp`, JSON.stringify(pending));
+  fs.renameSync(`${QUEUE_FILE}.tmp`, QUEUE_FILE);
+}
+async function flushQueue() {
+  while (pending.length) {
+    const response = await fetch(`${API_URL}/api/readings`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(pending[0]), signal: AbortSignal.timeout(10000) });
+    if (!response.ok) throw new Error(`Upload rejected (${response.status}): ${await response.text()}`);
+    pending.shift(); persistQueue();
+  }
+}
 
-let latitude = -6.1630;
-let longitude = 35.7516;
+const ambulances = [
+  {
+    code: "AMB-001",
+    id: null,
+    latitude: -6.1630,
+    longitude: 35.7516,
+    speed: 35,
+    rpm: 1700,
+    engineTemperature: 86,
+    batteryVoltage: 12.7,
+    fuelLevel: 82,
+    vibration: 1.0,
+    faultMode: null,
+    faultCycles: 0
+  },
 
-let speed = 35;
-let rpm = 1700;
-let engineTemperature = 86;
-let batteryVoltage = 12.7;
-let fuelLevel = 82;
-let vibration = 1.0;
+  {
+    code: "AMB-002",
+    id: null,
+    latitude: -6.1585,
+    longitude: 35.7580,
+    speed: 48,
+    rpm: 2200,
+    engineTemperature: 88,
+    batteryVoltage: 12.6,
+    fuelLevel: 64,
+    vibration: 1.1,
+    faultMode: null,
+    faultCycles: 0
+  },
 
-let faultMode = null;
-let faultCyclesRemaining = 0;
+  {
+    code: "AMB-003",
+    id: null,
+    latitude: -6.1690,
+    longitude: 35.7440,
+    speed: 0,
+    rpm: 800,
+    engineTemperature: 84,
+    batteryVoltage: 12.4,
+    fuelLevel: 45,
+    vibration: 0.8,
+    faultMode: null,
+    faultCycles: 0
+  }
+];
 
 function random(min, max) {
   return Math.random() * (max - min) + min;
@@ -21,199 +73,183 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
-function maybeStartFault() {
-  if (faultCyclesRemaining > 0) {
-    faultCyclesRemaining--;
+async function loadAmbulanceIds() {
+  const response = await fetch(`${API_URL}/api/ambulances`, { signal: AbortSignal.timeout(10000) });
+  if (!response.ok) throw new Error("Could not load fleet");
+  const databaseAmbulances = await response.json();
+
+  for (const ambulance of ambulances) {
+    const match = databaseAmbulances.find(
+      item => item.ambulance_code === ambulance.code
+    );
+
+    if (!match) {
+      throw new Error(`${ambulance.code} not found in database`);
+    }
+
+    ambulance.id = match.id;
+  }
+}
+
+function simulateFault(ambulance) {
+  if (ambulance.faultCycles > 0) {
+    ambulance.faultCycles--;
     return;
   }
 
-  faultMode = null;
+  ambulance.faultMode = null;
 
-  // Around 5% chance every reading
-  if (Math.random() < 0.05) {
+  if (Math.random() < 0.03) {
     const faults = [
       "HIGH_TEMP",
       "LOW_BATTERY",
       "HIGH_VIBRATION"
     ];
 
-    faultMode =
+    ambulance.faultMode =
       faults[Math.floor(Math.random() * faults.length)];
 
-    faultCyclesRemaining = Math.floor(random(3, 8));
+    ambulance.faultCycles =
+      Math.floor(random(3, 8));
 
-    console.log(`\n⚠ Simulating fault: ${faultMode}`);
+    console.log(
+      `⚠ ${ambulance.code}: ${ambulance.faultMode}`
+    );
   }
 }
 
-function updateVehicleData() {
-  maybeStartFault();
+function updateAmbulance(ambulance) {
+  simulateFault(ambulance);
 
-  // GPS movement
-  latitude += random(-0.00012, 0.00012);
-  longitude += random(-0.00012, 0.00012);
+  ambulance.latitude += random(-0.00012, 0.00012);
+  ambulance.longitude += random(-0.00012, 0.00012);
 
-  // Speed changes gradually
-  speed = clamp(
-    speed + random(-4, 4),
+  ambulance.speed = clamp(
+    ambulance.speed + random(-4, 4),
     0,
     80
   );
 
-  // RPM roughly follows vehicle speed
   const targetRpm =
-    speed === 0
+    ambulance.speed < 2
       ? 800
-      : 900 + speed * 30;
+      : 900 + ambulance.speed * 30;
 
-  rpm = Math.round(
+  ambulance.rpm = Math.round(
     clamp(
-      rpm + (targetRpm - rpm) * 0.3 + random(-100, 100),
+      ambulance.rpm +
+        (targetRpm - ambulance.rpm) * 0.3 +
+        random(-100, 100),
       750,
       3800
     )
   );
 
-  // Normal engine temp tends toward about 88°C
-  engineTemperature +=
-    (88 - engineTemperature) * 0.15 +
-    random(-0.6, 0.6);
+  ambulance.engineTemperature +=
+    (88 - ambulance.engineTemperature) * 0.15 +
+    random(-0.5, 0.5);
 
-  // Normal battery tends toward about 12.7V
-  batteryVoltage +=
-    (12.7 - batteryVoltage) * 0.2 +
+  ambulance.batteryVoltage +=
+    (12.7 - ambulance.batteryVoltage) * 0.2 +
     random(-0.04, 0.04);
 
-  // Fuel reduces very slowly
-  fuelLevel -= random(0.01, 0.04);
+  ambulance.fuelLevel -= random(0.005, 0.02);
 
-  // Normal vibration
-  vibration +=
-    (1.0 - vibration) * 0.25 +
-    random(-0.08, 0.08);
+  ambulance.vibration +=
+    (1 - ambulance.vibration) * 0.25 +
+    random(-0.07, 0.07);
 
-  // Simulated faults
-  if (faultMode === "HIGH_TEMP") {
-    engineTemperature += random(3, 6);
+  if (ambulance.faultMode === "HIGH_TEMP") {
+    ambulance.engineTemperature += random(3, 5);
   }
 
-  if (faultMode === "LOW_BATTERY") {
-    batteryVoltage -= random(0.2, 0.4);
+  if (ambulance.faultMode === "LOW_BATTERY") {
+    ambulance.batteryVoltage -= random(0.2, 0.4);
   }
 
-  if (faultMode === "HIGH_VIBRATION") {
-    vibration += random(0.5, 1.0);
+  if (ambulance.faultMode === "HIGH_VIBRATION") {
+    ambulance.vibration += random(0.5, 1);
   }
 
-  engineTemperature =
-    clamp(engineTemperature, 70, 115);
+  ambulance.engineTemperature =
+    clamp(ambulance.engineTemperature, 70, 115);
 
-  batteryVoltage =
-    clamp(batteryVoltage, 10.8, 14.4);
+  ambulance.batteryVoltage =
+    clamp(ambulance.batteryVoltage, 10.8, 14.4);
 
-  fuelLevel =
-    clamp(fuelLevel, 0, 100);
+  ambulance.fuelLevel =
+    clamp(ambulance.fuelLevel, 0, 100);
 
-  vibration =
-    clamp(vibration, 0.2, 5);
+  ambulance.vibration =
+    clamp(ambulance.vibration, 0.2, 5);
 }
 
-async function sendReading() {
-  try {
-    updateVehicleData();
+async function sendAmbulance(ambulance) {
+  updateAmbulance(ambulance);
 
-    const reading = {
-      ambulanceId: 1,
+  ambulance.odometerKm = (ambulance.odometerKm || 25000) + ambulance.speed * 5 / 3600;
+  const reading = {
+    eventId: randomUUID(),
+    recordedAt: new Date().toISOString(),
+    source: 'simulator',
+    odometerKm: Number(ambulance.odometerKm.toFixed(2)),
+    faultCodes: ambulance.faultMode === 'HIGH_TEMP' ? ['P0217'] : [],
+    ambulanceId: ambulance.id,
 
-      latitude: Number(latitude.toFixed(7)),
-      longitude: Number(longitude.toFixed(7)),
+    latitude: Number(
+      ambulance.latitude.toFixed(7)
+    ),
 
-      speed: Number(speed.toFixed(2)),
-      rpm,
+    longitude: Number(
+      ambulance.longitude.toFixed(7)
+    ),
 
-      engineTemperature:
-        Number(engineTemperature.toFixed(2)),
+    speed: Number(
+      ambulance.speed.toFixed(2)
+    ),
 
-      batteryVoltage:
-        Number(batteryVoltage.toFixed(2)),
+    rpm: ambulance.rpm,
 
-      fuelLevel:
-        Number(fuelLevel.toFixed(2)),
+    engineTemperature: Number(
+      ambulance.engineTemperature.toFixed(2)
+    ),
 
-      vibration:
-        Number(vibration.toFixed(3))
-    };
+    batteryVoltage: Number(
+      ambulance.batteryVoltage.toFixed(2)
+    ),
 
-    const response = await fetch(API_URL, {
-      method: "POST",
+    fuelLevel: Number(
+      ambulance.fuelLevel.toFixed(2)
+    ),
 
-      headers: {
-        "Content-Type": "application/json"
-      },
+    vibration: Number(
+      ambulance.vibration.toFixed(3)
+    )
+  };
 
-      body: JSON.stringify(reading)
-    });
+  if (pending.length >= 50000) throw new Error('Offline queue full; sampling paused. Restore connectivity before continuing.');
+  pending.push(reading);
+  persistQueue();
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      console.error("Server error:", data);
-      return;
-    }
-
-    console.log("\n🚑 AMB-001");
-    console.log("-----------------------------");
-
-    console.log(
-      `GPS: ${reading.latitude}, ${reading.longitude}`
-    );
-
-    console.log(
-      `Speed: ${reading.speed} km/h`
-    );
-
-    console.log(
-      `RPM: ${reading.rpm}`
-    );
-
-    console.log(
-      `Engine Temp: ${reading.engineTemperature} °C`
-    );
-
-    console.log(
-      `Battery: ${reading.batteryVoltage} V`
-    );
-
-    console.log(
-      `Fuel: ${reading.fuelLevel}%`
-    );
-
-    console.log(
-      `Vibration: ${reading.vibration}`
-    );
-
-    console.log(
-      `Mode: ${faultMode ?? "NORMAL"}`
-    );
-
-  } catch (error) {
-
-    console.error(
-      "❌ Cannot connect to Smart Ambulance API"
-    );
-
-    console.error(error.message);
-  }
+  console.log(
+    `🚑 ${ambulance.code} | ` +
+    `${reading.speed} km/h | ` +
+    `${reading.engineTemperature}°C | ` +
+    `${reading.fuelLevel}% fuel`
+  );
 }
 
-console.log(
-  "🚑 Smart Ambulance Simulator Started"
-);
-
-console.log(
-  "Sending realistic data every 5 seconds..."
-);
-
-sendReading();
-
-setInterval(sendReading, 5000);
+async function runSimulation() {
+  let initialized = false;
+  while (true) {
+    try {
+      if (!initialized) { await loadAmbulanceIds(); initialized = true; }
+      // Flush first when full so reconnecting can recover without dropping data.
+      if (pending.length >= 49997) await flushQueue();
+      for (const ambulance of ambulances) await sendAmbulance(ambulance);
+      await flushQueue();
+    } catch (error) { console.error(`Simulator: ${error.message}. Buffered: ${pending.length}; retrying.`); }
+    await new Promise(resolve => setTimeout(resolve, 5000));
+  }
+}
+runSimulation();

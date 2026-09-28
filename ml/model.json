@@ -1,0 +1,87 @@
+{
+  "version": "synthetic-tree-1",
+  "features": [
+    "battery_voltage",
+    "battery_slope_per_hour",
+    "overheat_fraction",
+    "vibration",
+    "vibration_slope_per_hour",
+    "fault_fraction"
+  ],
+  "tree": {
+    "feature": 0,
+    "threshold": 12.082085933025699,
+    "left": {
+      "feature": 3,
+      "threshold": 2.909384716032204,
+      "left": {
+        "feature": 2,
+        "threshold": 0.5816979489686703,
+        "left": {
+          "positiveRate": 0.5517241379310345,
+          "samples": 29
+        },
+        "right": {
+          "positiveRate": 0.2857142857142857,
+          "samples": 28
+        }
+      },
+      "right": {
+        "feature": 3,
+        "threshold": 3.4822033491276447,
+        "left": {
+          "feature": 1,
+          "threshold": -0.35934994840546763,
+          "left": {
+            "positiveRate": 0.6086956521739131,
+            "samples": 46
+          },
+          "right": {
+            "positiveRate": 0.9473684210526315,
+            "samples": 19
+          }
+        },
+        "right": {
+          "positiveRate": 1.0,
+          "samples": 33
+        }
+      }
+    },
+    "right": {
+      "feature": 3,
+      "threshold": 2.8162698831710085,
+      "left": {
+        "feature": 2,
+        "threshold": 0.22854156031724918,
+        "left": {
+          "feature": 1,
+          "threshold": 0.06517156908514882,
+          "left": {
+            "positiveRate": 0.009708737864077669,
+            "samples": 103
+          },
+          "right": {
+            "positiveRate": 0.17647058823529413,
+            "samples": 17
+          }
+        },
+        "right": {
+          "feature": 5,
+          "threshold": 0.3674680295251828,
+          "left": {
+            "positiveRate": 0.10526315789473684,
+            "samples": 114
+          },
+          "right": {
+            "positiveRate": 0.24242424242424243,
+            "samples": 33
+          }
+        }
+      },
+      "right": {
+        "positiveRate": 0.42857142857142855,
+        "samples": 28
+      }
+    }
+  }
+}
