@@ -70,3 +70,13 @@ npm run lint
 ```
 
 Database migrations are additive and preserve existing readings. Legacy timestamp-without-time-zone observations use the database's configured timezone during backfill; confirm that timezone matches the original installation before migrating another deployment. Back up an existing deployment before a production migration.
+
+## Dashboard workspaces
+
+- **Operations:** fleet totals, search and hospital filters, map and attention queue. Select a vehicle to investigate it.
+- **Vehicle:** a selected-vehicle workspace with Telemetry, Trends, Journey history, Faults and Maintenance tabs.
+- **Maintenance:** a prioritized worklist for inspection holds, overdue service, missing schedules and upcoming service, with access to recorded repairs and clearance actions.
+- **Dispatch:** incident coordinates, eligible candidates, exclusion reasons and links to review vehicle evidence. Coordinates remain in memory when switching workspaces.
+- **Planning:** hospital coverage minimums and availability scenarios.
+
+Hash navigation supports direct links (for example `#vehicle/1/trends`) and browser Back/Forward. The interface retains the white and `#f54242` palette. These are CHAP workspace designs informed by SCAS's publicly documented IVM approach, not a reproduction of its private interface.
