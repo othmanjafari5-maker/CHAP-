@@ -14,3 +14,5 @@ test('distance supports valid zero coordinates',()=>assert.equal(distance({latit
 
 test('coercible nonnumeric values are rejected',()=>{for(const value of [true,false,[],{},' ',null])assert.equal(numeric(value),false);});
 test('mileage-based service requires a current odometer',()=>assert.equal(assess({...healthy,odometer_km:null},[],now).dispatch.eligible,false));
+
+test('demo predictions cannot veto otherwise eligible vehicles',()=>{const history=Array.from({length:120},(_,i)=>({recorded_at:new Date(now-(120-i)*5000).toISOString(),battery_voltage:11-i*.001,engine_temperature:110,vibration:4+i*.01,fault_codes:['P0300']}));const a=assess(healthy,history,now);assert.equal(a.dispatch.eligible,true);assert.ok(!a.dispatch.exclusionReasons.some(r=>r.includes('demo')));});

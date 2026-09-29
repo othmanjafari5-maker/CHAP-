@@ -9,6 +9,8 @@ const { once } = require('node:events');
 
 test('simulator preserves queued event IDs across offline restart', { timeout: 20000 }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'chap-simulator-'));
+  const devicesFile = path.join(directory, 'devices.json');
+  fs.writeFileSync(devicesFile, JSON.stringify(Object.fromEntries([1,2,3].map(id=>[`AMB-00${id}`,{id,token:`test-device-${id}`}]))));
   const queueFile = path.join(directory, 'queue.json');
   let offline = true, notifyFailure, notifyRecovered;
   const failure = new Promise(resolve => { notifyFailure = resolve; });
@@ -19,13 +21,15 @@ test('simulator preserves queued event IDs across offline restart', { timeout: 2
     if (req.method === 'GET') { res.end(JSON.stringify([1,2,3].map(id => ({ id, ambulance_code: `AMB-00${id}` })))); return; }
     let text = ''; for await (const chunk of req) text += chunk;
     if (offline) { res.statusCode = 503; res.end('{}'); notifyFailure(); return; }
-    accepted.push(JSON.parse(text)); res.end('{}');
+    const event = JSON.parse(text);
+    assert.equal(req.headers.authorization, `Bearer test-device-${event.ambulanceId}`);
+    accepted.push(event); res.end('{}');
     if (accepted.length >= 6) notifyRecovered();
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   let child;
   const start = () => spawn(process.execPath, [path.join(__dirname, 'simulator.js')], {
-    env: { ...process.env, API_URL: `http://127.0.0.1:${server.address().port}`, QUEUE_FILE: queueFile }, stdio: 'ignore',
+    env: { ...process.env, API_URL: `http://127.0.0.1:${server.address().port}`, QUEUE_FILE: queueFile, DEVICES_FILE: devicesFile }, stdio: 'ignore',
   });
   const stop = async () => { if (child && child.exitCode === null) { child.kill(); await once(child, 'exit'); } };
   try {

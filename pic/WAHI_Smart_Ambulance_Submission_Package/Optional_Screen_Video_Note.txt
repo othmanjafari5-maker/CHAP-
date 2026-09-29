@@ -1,0 +1,3 @@
+Optional screen video note
+
+A short screen recording can be added after the prototype is running. Record the backend running, the simulator or ESP32 sending readings, and the dashboard showing ambulance location, route history, and vehicle alerts.

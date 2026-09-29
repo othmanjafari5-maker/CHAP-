@@ -4,7 +4,7 @@ const cors = require('cors');
 const crypto = require('node:crypto');
 const pool = require('./db');
 const migrate = require('./migrate');
-const { numeric, alerts, assess, distance } = require('./intelligence');
+const { numeric, alerts, assess } = require('./intelligence');
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '256kb' }));
@@ -13,13 +13,13 @@ function id(value) { if (!/^\d+$/.test(String(value)) || !Number.isSafeInteger(N
 function number(value, name, min, max) { if (!numeric(value) || Number(value) < min || Number(value) > max) throw fail(`Invalid ${name}`); return Number(value); }
 function date(value, name) { if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) throw fail(`Invalid ${name}`); return new Date(value).toISOString(); }
 function codes(value) { if (!Array.isArray(value) || value.length > 30 || value.some(v => typeof v !== 'string' || !/^[A-Z0-9_-]{1,20}$/.test(v))) throw fail('Invalid fault codes'); return value; }
-function authorize(req, res, next) {
-  const expected = process.env.ADMIN_TOKEN;
-  if (!expected) return res.status(503).json({ message: 'Set ADMIN_TOKEN on the backend to enable maintenance and inspection actions' });
-  const supplied = req.headers.authorization?.replace(/^Bearer /, '') || '';
-  if (Buffer.byteLength(supplied) !== Buffer.byteLength(expected) || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) return res.status(401).json({ message: 'Invalid operator token' });
-  next();
-}
+const {identity,roles,device,authRoutes}=require('./security');
+const authorize=roles('admin','mechanic');
+authRoutes(app);
+app.use('/api',identity,(req,res,next)=>{
+  if(req.path==='/readings'||req.path==='/health')return next();
+  return roles()(req,res,next);
+});
 async function fleet(db = pool) {
   const result = await db.query(`SELECT a.*, vr.latitude, vr.longitude, vr.speed, vr.rpm,
     vr.engine_temperature, vr.battery_voltage, vr.fuel_level, vr.vibration, vr.recorded_at,
@@ -44,7 +44,7 @@ app.get('/api/ambulances/:id/latest', async (req,res) => {
   if (!vehicle) throw fail('Ambulance not found',404);
   res.json(vehicle);
 });
-app.post('/api/readings', async (req,res) => {
+app.post('/api/readings', device, async (req,res) => {
   const b = req.body;
   const ambulanceId = id(b.ambulanceId);
   const fields = [['latitude',-90,90],['longitude',-180,180],['speed',0,300],['rpm',0,15000],['engineTemperature',-50,200],['batteryVoltage',0,40],['fuelLevel',0,100],['vibration',0,100]];
@@ -74,7 +74,10 @@ app.post('/api/readings', async (req,res) => {
         for (const old of active.rows) if (!current.some(a=>a.type===old.alert_type)) await client.query("UPDATE vehicle_alerts SET status='RESOLVED',resolved_at=CURRENT_TIMESTAMP WHERE id=$1",[old.id]);
         for (const a of current) {
           const old = active.rows.find(o=>o.alert_type===a.type);
-          if (old) await client.query('UPDATE vehicle_alerts SET severity=$1,message=$2,sensor_value=$3 WHERE id=$4',[a.severity,a.message,a.value,old.id]);
+          if (old) {
+            await client.query('UPDATE vehicle_alerts SET severity=$1::varchar,message=$2,sensor_value=$3,acknowledged_by=CASE WHEN severity<>$1::varchar THEN NULL ELSE acknowledged_by END,acknowledged_at=CASE WHEN severity<>$1::varchar THEN NULL ELSE acknowledged_at END WHERE id=$4',[a.severity,a.message,a.value,old.id]);
+            if(old.severity!==a.severity)await require('./security').audit(client,null,'ALERT_SEVERITY_CHANGED','alert',old.id,ambulanceId,{from:old.severity,to:a.severity,message:a.message});
+          }
           else await client.query('INSERT INTO vehicle_alerts (ambulance_id,alert_type,severity,message,sensor_value) VALUES ($1,$2,$3,$4,$5)',[ambulanceId,a.type,a.severity,a.message,a.value]);
         }
       }
@@ -140,16 +143,19 @@ app.post('/api/ambulances/:id/clear-inspection', authorize, async (req,res) => {
     await client.query('COMMIT'); res.json(result.rows[0]);
   } catch(e) {await client.query('ROLLBACK');throw e;} finally {client.release();}
 });
-app.post('/api/dispatch/recommendations', async (req,res) => {
+app.post('/api/dispatch/recommendations',roles('admin','dispatcher'), async (req,res) => {
   const lat=number(req.body.latitude,'latitude',-90,90),lon=number(req.body.longitude,'longitude',-180,180);
   const all=await fleet(), candidates=[],excluded=[];
+  const routing=await require('./routing').travel(all.filter(a=>a.dispatch.eligible&&numeric(a.latitude)&&numeric(a.longitude)),lat,lon);
   for (const a of all) {
     if (!a.dispatch.eligible || !numeric(a.latitude)||!numeric(a.longitude)) {excluded.push({id:a.id,code:a.ambulance_code,reasons:[...a.dispatch.exclusionReasons,...(!numeric(a.latitude)||!numeric(a.longitude)?['GPS unavailable']:[])]});continue;}
-    const km=distance(a,lat,lon);
-    candidates.push({id:a.id,code:a.ambulance_code,distanceKm:Math.round(km*100)/100,readiness:a.readiness.score,risk:a.risk.level,rankScore:a.readiness.score*.6+Number(a.fuel_level)*.1-Math.min(km,200)*2-(a.risk.level==='MEDIUM'?15:0),reasons:['Live telemetry','No inspection hold','Service current']});
+    const route=routing.values.find(r=>r.id===a.id);
+    if(!route?.reachable){excluded.push({id:a.id,code:a.ambulance_code,reasons:['No road route found']});continue;}
+    const km=route.distanceKm;
+    candidates.push({id:a.id,code:a.ambulance_code,distanceKm:Math.round(km*100)/100,durationMinutes:route.durationMinutes==null?null:Math.round(route.durationMinutes*10)/10,readiness:a.readiness.score,risk:a.risk.level,rankScore:a.readiness.score*.6+Number(a.fuel_level)*.1-(route.durationMinutes??Math.min(km,200)*2),reasons:['Live telemetry','No inspection hold','Service current']});
   }
   candidates.sort((a,b)=>b.rankScore-a.rankScore);
-  res.json({evaluatedAt:new Date().toISOString(),candidates,excluded,distanceType:'Approximate straight-line distance; not a driving ETA',message:candidates.length?'Ranked eligible vehicles':'No suitable ambulance available'});
+  res.json({evaluatedAt:new Date().toISOString(),candidates,excluded,routingMode:routing.mode,distanceType:routing.note,message:candidates.length?'Ranked eligible vehicles':'No suitable ambulance available'});
 });
 app.get('/api/fleet/coverage', async (req,res) => {
   const settings=(await pool.query('SELECT * FROM coverage_settings')).rows;
@@ -161,17 +167,41 @@ app.get('/api/fleet/coverage', async (req,res) => {
   }
   res.json(Object.values(groups).map(g=>({...g,risk:g.ready<g.minimum?'CRITICAL':g.ready===g.minimum?'WARNING':'ADEQUATE'})));
 });
-app.put('/api/fleet/coverage',authorize,async(req,res)=>{
+app.put('/api/fleet/coverage',roles('admin'),async(req,res)=>{
   const name=req.body.hospital;
   if(typeof name!=='string'||!name.trim()||name.length>200)throw fail('Hospital required');
   const minimum=number(req.body.minimum,'minimum coverage',1,1000);
   if(!Number.isInteger(minimum))throw fail('Minimum must be an integer');
-  await pool.query('INSERT INTO coverage_settings (hospital_name,minimum_ready) VALUES ($1,$2) ON CONFLICT (hospital_name) DO UPDATE SET minimum_ready=$2',[name,minimum]);res.json({message:'Coverage minimum saved'});
+  await require('./workflows').tx(async db=>{await db.query('INSERT INTO coverage_settings (hospital_name,minimum_ready) VALUES ($1,$2) ON CONFLICT (hospital_name) DO UPDATE SET minimum_ready=$2',[name,minimum]);await require('./security').audit(db,req.user,'COVERAGE_MINIMUM_CHANGED','coverage',null,null,{hospital:name,minimum});});res.json({message:'Coverage minimum saved'});
 });
 app.get('/api/fleet/availability',async(req,res)=>{
   const all=await fleet();
-  res.json({method:'Conservative scenario, not a calibrated probability forecast. Assumes current status persists; excludes service due by horizon and high demo risk.',horizons:[0,3,7].map(days=>({days,total:all.length,expected:all.filter(a=>a.dispatch.eligible&&new Date(a.next_service_date).getTime()>=new Date(Date.now()+days*86400000).setUTCHours(0,0,0,0)).length,serviceDue:all.filter(a=>a.next_service_date&&new Date(a.next_service_date).getTime()<new Date(Date.now()+days*86400000).setUTCHours(0,0,0,0)).length,unknown:all.filter(a=>!a.readiness.complete||a.risk.level==='UNKNOWN').length}))});
+  const scheduled=(await pool.query("SELECT COUNT(*)::int AS count FROM work_orders WHERE status='in_progress' AND expected_completion IS NOT NULL")).rows[0].count;
+  res.json({scheduledReturns:scheduled,method:'Conservative scenario, not a calibrated probability forecast. Assumes current status persists; excludes service due by horizon.',horizons:[0,3,7].map(days=>({days,total:all.length,expected:all.filter(a=>a.dispatch.eligible&&new Date(a.next_service_date).getTime()>=new Date(Date.now()+days*86400000).setUTCHours(0,0,0,0)).length,serviceDue:all.filter(a=>a.next_service_date&&new Date(a.next_service_date).getTime()<new Date(Date.now()+days*86400000).setUTCHours(0,0,0,0)).length,unknown:all.filter(a=>!a.readiness.complete||a.risk.level==='UNKNOWN').length}))});
 });
-app.use((err,req,res,next)=>{ console.error(err.message);res.status(err.status|| (err.code==='23503'?404:500)).json({message:err.status?err.message:err.code==='23503'?'Ambulance not found':'Request failed; check server logs'}); });
+app.get('/api/coverage-points',async(req,res)=>{
+  const points=(await pool.query('SELECT * FROM coverage_points ORDER BY name')).rows;
+  const available=(await fleet()).filter(a=>a.dispatch.eligible&&numeric(a.latitude)&&numeric(a.longitude));
+  const results=[];
+  for(const point of points){
+    const routing=await require('./routing').travel(available,Number(point.latitude),Number(point.longitude));
+    const within=routing.values.filter(v=>v.reachable&&v.durationMinutes!==null&&v.durationMinutes<=point.target_minutes);
+    results.push({...point,mode:routing.mode,note:routing.note,withinTarget:routing.mode==='road'?within.length:null,risk:routing.mode!=='road'?'UNKNOWN':within.length===0?'CRITICAL':within.length===1?'WARNING':'ADEQUATE'});
+  }
+  res.json(results);
+});
+app.post('/api/coverage-points',roles('admin'),async(req,res)=>{
+  const b=req.body;if(typeof b.name!=='string'||!b.name.trim()||b.name.length>200)throw fail('Point name required');
+  const lat=number(b.latitude,'latitude',-90,90),lon=number(b.longitude,'longitude',-180,180),target=number(b.targetMinutes,'target minutes',1,180);
+  if(!Number.isInteger(target))throw fail('Target must be whole minutes');
+  const result=await require('./workflows').tx(async db=>{
+    await db.query('LOCK TABLE coverage_points IN SHARE ROW EXCLUSIVE MODE');
+    if(Number((await db.query('SELECT COUNT(*) FROM coverage_points')).rows[0].count)>=20)throw fail('Maximum 20 coverage points');
+    const r=await db.query('INSERT INTO coverage_points(name,latitude,longitude,target_minutes) VALUES ($1,$2,$3,$4) ON CONFLICT(name) DO UPDATE SET latitude=$2,longitude=$3,target_minutes=$4 RETURNING *',[b.name.trim(),lat,lon,target]);
+    await require('./security').audit(db,req.user,'COVERAGE_POINT_SAVED','coverage_point',r.rows[0].id,null,{name:b.name});return r.rows[0];
+  });res.status(201).json(result);
+});
+require('./workflows').install(app,fleet);
+app.use((err,req,res,next)=>{ console.error(err.message);res.status(err.status|| (err.code==='23503'?404:err.code==='23505'?409:500)).json({message:err.status?err.message:err.code==='23503'?'Referenced record not found':err.code==='23505'?'This record already exists or the vehicle is already assigned':'Request failed; check server logs'}); });
 if(require.main===module) migrate().then(()=>app.listen(process.env.PORT||5000,()=>console.log('CHAP API ready'))).catch(e=>{console.error(e.message);process.exitCode=1;});
 module.exports={app,fleet};

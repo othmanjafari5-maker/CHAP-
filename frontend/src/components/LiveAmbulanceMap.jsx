@@ -1,4 +1,4 @@
-import { API_URL, validGPS } from '../api';
+import { request, validGPS } from '../api';
 import { useEffect, useState } from "react";
 
 import {
@@ -57,15 +57,7 @@ function LiveAmbulanceMap({ ambulance }) {
     let timer;
     const fetchAmbulanceRoute = async () => {
       try {
-        const response = await fetch(
-          `${API_URL}/api/ambulances/${ambulance.id}/history?limit=100`, { signal: controller.signal }
-        );
-
-        if (!response.ok) {
-          throw new Error("Failed to load route");
-        }
-
-        const data = await response.json();
+        const data = await request(`/api/ambulances/${ambulance.id}/history?limit=100`, { signal: controller.signal });
 
         const coordinates = data
           .filter(

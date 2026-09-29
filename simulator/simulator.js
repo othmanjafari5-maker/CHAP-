@@ -3,6 +3,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const API_URL = process.env.API_URL || "http://localhost:5000";
 const QUEUE_FILE = process.env.QUEUE_FILE || path.join(__dirname, 'pending-readings.json');
+const devices = JSON.parse(fs.readFileSync(process.env.DEVICES_FILE || path.join(__dirname, 'devices.json'), 'utf8'));
 let pending = [];
 try { pending = JSON.parse(fs.readFileSync(QUEUE_FILE, 'utf8')); }
 catch (error) { if (error.code !== 'ENOENT') throw new Error(`Cannot read durable queue: ${error.message}`); }
@@ -12,7 +13,7 @@ function persistQueue() {
 }
 async function flushQueue() {
   while (pending.length) {
-    const response = await fetch(`${API_URL}/api/readings`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(pending[0]), signal: AbortSignal.timeout(10000) });
+    const response = await fetch(`${API_URL}/api/readings`, { method: 'POST', headers: {'Content-Type':'application/json', Authorization: `Bearer ${Object.values(devices).find(d => d.id === pending[0].ambulanceId)?.token || ''}`}, body: JSON.stringify(pending[0]), signal: AbortSignal.timeout(10000) });
     if (!response.ok) throw new Error(`Upload rejected (${response.status}): ${await response.text()}`);
     pending.shift(); persistQueue();
   }
@@ -74,20 +75,10 @@ function clamp(value, min, max) {
 }
 
 async function loadAmbulanceIds() {
-  const response = await fetch(`${API_URL}/api/ambulances`, { signal: AbortSignal.timeout(10000) });
-  if (!response.ok) throw new Error("Could not load fleet");
-  const databaseAmbulances = await response.json();
-
   for (const ambulance of ambulances) {
-    const match = databaseAmbulances.find(
-      item => item.ambulance_code === ambulance.code
-    );
-
-    if (!match) {
-      throw new Error(`${ambulance.code} not found in database`);
-    }
-
-    ambulance.id = match.id;
+    const device = devices[ambulance.code];
+    if (!device?.id || !device?.token) throw new Error(`Missing device credentials for ${ambulance.code}; run backend/bootstrap.js --simulator`);
+    ambulance.id = device.id;
   }
 }
 

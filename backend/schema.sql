@@ -44,3 +44,50 @@ CREATE INDEX IF NOT EXISTS maintenance_vehicle_idx ON maintenance_records(ambula
 CREATE TABLE IF NOT EXISTS coverage_settings (
  hospital_name TEXT PRIMARY KEY, minimum_ready INTEGER NOT NULL DEFAULT 1 CHECK(minimum_ready >= 1)
 );
+
+CREATE TABLE IF NOT EXISTS app_users (
+ id SERIAL PRIMARY KEY, username TEXT UNIQUE NOT NULL, display_name TEXT NOT NULL,
+ password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','dispatcher','mechanic','viewer')),
+ active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS sessions (
+ token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES app_users(id),
+ expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS login_limits (key TEXT PRIMARY KEY, attempts INTEGER NOT NULL, reset_at TIMESTAMPTZ NOT NULL);
+CREATE TABLE IF NOT EXISTS devices (
+ ambulance_id INTEGER PRIMARY KEY REFERENCES ambulances(id), name TEXT NOT NULL,
+ token_hash TEXT NOT NULL UNIQUE, active BOOLEAN NOT NULL DEFAULT TRUE, rotated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS incidents (
+ id SERIAL PRIMARY KEY, reference TEXT NOT NULL UNIQUE, description TEXT NOT NULL,
+ priority TEXT NOT NULL CHECK(priority IN ('urgent','standard')),
+ latitude NUMERIC NOT NULL CHECK(latitude BETWEEN -90 AND 90), longitude NUMERIC NOT NULL CHECK(longitude BETWEEN -180 AND 180),
+ status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','assigned','en_route','on_scene','transporting','completed','cancelled')),
+ ambulance_id INTEGER REFERENCES ambulances(id), created_by INTEGER NOT NULL REFERENCES app_users(id),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), completed_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS incident_active_vehicle ON incidents(ambulance_id) WHERE status NOT IN ('completed','cancelled');
+CREATE TABLE IF NOT EXISTS work_orders (
+ id SERIAL PRIMARY KEY, ambulance_id INTEGER NOT NULL REFERENCES ambulances(id),
+ title TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', technician_id INTEGER REFERENCES app_users(id),
+ status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','in_progress','completed','cancelled')),
+ expected_completion TIMESTAMPTZ, completion_notes TEXT, created_by INTEGER NOT NULL REFERENCES app_users(id),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS audit_events (
+ id BIGSERIAL PRIMARY KEY, ambulance_id INTEGER REFERENCES ambulances(id), actor_id INTEGER REFERENCES app_users(id),
+ actor_name TEXT NOT NULL, action TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id INTEGER,
+ details JSONB NOT NULL DEFAULT '{}', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS audit_vehicle_time ON audit_events(ambulance_id,created_at DESC);
+ALTER TABLE vehicle_alerts ADD COLUMN IF NOT EXISTS acknowledged_by INTEGER REFERENCES app_users(id);
+ALTER TABLE vehicle_alerts ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMPTZ;
+ALTER TABLE vehicle_alerts ADD COLUMN IF NOT EXISTS escalated_by INTEGER REFERENCES app_users(id);
+ALTER TABLE vehicle_alerts ADD COLUMN IF NOT EXISTS escalated_at TIMESTAMPTZ;
+ALTER TABLE vehicle_alerts ADD COLUMN IF NOT EXISTS operator_notes TEXT;
+CREATE TABLE IF NOT EXISTS coverage_points (
+ id SERIAL PRIMARY KEY, name TEXT UNIQUE NOT NULL,
+ latitude NUMERIC NOT NULL CHECK(latitude BETWEEN -90 AND 90),longitude NUMERIC NOT NULL CHECK(longitude BETWEEN -180 AND 180),
+ target_minutes INTEGER NOT NULL CHECK(target_minutes BETWEEN 1 AND 180)
+);

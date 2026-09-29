@@ -1,11 +1,12 @@
 import { useState } from 'react';
 
-export function FleetFilters({ vehicles, search, setSearch, hospital, setHospital }) {
+export function FleetFilters({ vehicles, search, setSearch, hospital, setHospital, status, setStatus }) {
   const hospitals = [...new Set(vehicles.map(a => a.hospital_name || 'Unassigned'))].sort();
   return <div className="workspace-filters">
     <label>Find an ambulance<input type="search" value={search} onChange={e => setSearch(e.target.value)} placeholder="Vehicle code or registration" /></label>
     <label>Hospital<select value={hospital} onChange={e => setHospital(e.target.value)}><option value="">All hospitals</option>{hospitals.map(name => <option key={name}>{name}</option>)}</select></label>
-    <button type="button" className="secondary-button" onClick={() => { setSearch(''); setHospital(''); }}>Reset filters</button>
+    <label>Status<select value={status} onChange={e=>setStatus(e.target.value)}><option value="">All states</option><option value="ready">Dispatch ready</option><option value="hold">Inspection holds</option><option value="offline">Delayed / offline</option><option value="maintenance">In maintenance</option><option value="responding">Responding</option><option value="retired">Retired</option></select></label>
+    <button type="button" className="secondary-button" onClick={() => { setSearch(''); setHospital(''); setStatus(''); }}>Reset filters</button>
   </div>;
 }
 

@@ -1,0 +1,9 @@
+WAHI Smart Ambulance IoT System - 
+
+At this stage, the project has completed the concept note and defined the main problem, target users, hardware device, data flow, dashboard idea, and success measures. The project focuses on ambulance reliability, live location tracking, vehicle-condition monitoring, and emergency coordination using real IoT hardware.
+
+The technical architecture has been planned around sensors connected to an ESP32 microcontroller. The selected hardware includes a GPS module, GSM/4G module, voltage sensor, temperature sensor, vibration sensor, fuel-level input, and future OBD-II vehicle diagnostics. The data flow has been designed from ambulance sensors to ESP32, then to the backend server, database, and web dashboard.
+
+The software foundation has also started. The backend direction uses Node.js and Express, while PostgreSQL is planned for storing ambulance readings and location history. The prototype data structure includes GPS location, speed, engine temperature, battery voltage, fuel level, RPM, and vibration. A simulator approach has been prepared to send changing ambulance readings before the physical hardware is fully connected.
+
+On the frontend side, the dashboard direction has been designed around a live ambulance map, route history, current vehicle status, and warning alerts. The next stage is to connect real ESP32 sensor readings to the backend and show them live on the dashboard.

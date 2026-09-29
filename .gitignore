@@ -4,3 +4,10 @@ node_modules/
 
 simulator/pending-readings.json*
 frontend/dist/
+
+backend/.initial-login
+simulator/devices.json
+
+__pycache__/
+ml/review-windows.csv
+ml/candidate*.json

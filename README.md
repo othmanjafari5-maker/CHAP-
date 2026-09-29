@@ -1,82 +1,109 @@
 # CHAP — Ambulance operational readiness
 
-React/Leaflet dashboard, Express/PostgreSQL API, persistent telemetry simulator and a reproducible decision-tree demo. White is the primary UI color; `#f54242` is the secondary color.
+React/Leaflet dashboard, Express/PostgreSQL API, authenticated telemetry simulator and advisory ML demonstration. Primary color: white. Secondary color: `#f54242`.
 
-## Run
+## Start
 
-1. Create a PostgreSQL database. Copy `backend/.env.example` to `backend/.env` and set its connection details. Set a long random `ADMIN_TOKEN` for maintenance and inspection actions. Existing `.env` files are not overwritten.
-2. In `backend`, run `npm install`, `npm run migrate`, and `npm run seed` if you need the three demo vehicles. Existing vehicles are retained. Run `npm start` (default port 5000). Startup also applies the idempotent additive schema.
-3. In `frontend`, run `npm install` and `npm run dev`. Optionally set `VITE_API_URL` using `.env.example`.
-4. From the repository root, run `node simulator/simulator.js`. It looks up AMB-001 through AMB-003 in the database.
-5. Select a vehicle and add a completed maintenance record with its next service date, operator name and backend operator token. No maintenance history is fabricated for existing vehicles. Missing service schedules and missing fault scans intentionally prevent READY status.
-
-Use Node 22.12 or newer for the current Vite toolchain. Use Python 3 to regenerate the included ML artifact with `python3 ml/train.py`, then restart the backend to load it.
-
-## Implemented features
-
-- Weighted 0–100 readiness, reasons and common backend dispatch eligibility rules.
-- LIVE (up to 15 seconds), DELAYED (up to 60 seconds), OFFLINE and UNKNOWN states based on observation time. Last receipt is shown separately. Dashboard connection states age even if requests fail.
-- Persistent inspection holds for critical readings and reported fault codes. Normal readings do not clear a hold. Operator-token authorization and inspection notes are required for clearance.
-- Historical battery, temperature, vibration, RPM and new fault-occurrence charts; all selected-period samples aggregated into approximately 120 buckets, with missing buckets shown as gaps.
-- Append-only maintenance records, next service date/mileage, failure labels and operator attribution.
-- Synthetic-data decision tree with held-out evaluation and explicit DEMO labels. Insufficient history shows UNKNOWN. Requires at least 12 valid samples spanning one minute.
-- Readiness-first dispatch ranking with exclusions and straight-line distance. This recommends vehicles; it does not assign or dispatch them.
-- Hospital-level coverage with configurable minimums, and today/3-day/7-day conservative availability scenarios.
-- Durable simulator queue with stable event IDs, retry deduplication and original observation timestamps. Failed uploads remain on disk. At capacity, sampling pauses instead of silently dropping data.
-
-## API
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| GET | `/api/health` | Database connectivity |
-| POST | `/api/readings` | Validated, transactional telemetry ingestion |
-| GET | `/api/ambulances` | Fleet with readiness, freshness, risk and safety |
-| GET | `/api/ambulances/:id/latest` | Vehicle intelligence |
-| GET | `/api/ambulances/:id/trends?hours=24` | Aggregated sensor trends and new fault occurrences |
-| GET | `/api/ambulances/:id/history?from=...&to=...&limit=...` | Chronological telemetry, max 31-day range and 2,000 rows |
-| GET / POST | `/api/ambulances/:id/maintenance` | Read / append service records |
-| POST | `/api/ambulances/:id/clear-inspection` | Audited clearance |
-| POST | `/api/dispatch/recommendations` | Rank for `{latitude, longitude}` |
-| GET / PUT | `/api/fleet/coverage` | Coverage / set `{hospital, minimum}` |
-| GET | `/api/fleet/availability` | Scenario forecasts |
-
-Maintenance writes, clearance and coverage configuration require `Authorization: Bearer <ADMIN_TOKEN>`. The dashboard keeps this token only in component memory. This is prototype operator authentication, not a multi-user identity system. Deployments need TLS, individual identities and device authentication before exposing ingestion publicly.
-
-Telemetry accepts existing sensor fields plus `eventId`, `recordedAt`, `odometerKm`, `faultCodes` and `source`. Legacy payloads are accepted but absent fault scans remain unknown. `faultCodes: []` means a completed scan with no faults. Ingestion rejects invalid numbers and timestamps more than 30 seconds ahead. Old uploads cannot replace current readings or resolve newer alerts. A historical critical event may still create an inspection hold.
-
-## Model and operational assumptions
-
-`ml/train.py` generates 600 independent synthetic vehicle scenarios, trains a small decision tree on 450 and evaluates on 150. `ml/evaluation.json` includes confusion counts, precision, recall and an always-healthy baseline. `ml/synthetic_dataset.csv` identifies every scenario. Outcomes are simulated future failures driven by hidden wear; they are not real maintenance labels.
-
-The artifact is a demonstration of the prediction pipeline. Its uncalibrated risk bands are not real fleet probabilities. Real training needs longitudinal telemetry joined to subsequent recorded failures, vehicle/time-separated validation and calibration. Existing maintenance records capture future labels for that work. Battery/temperature/vibration thresholds and score weights are prototype assumptions; vibration units depend on hardware. All reported fault codes conservatively require inspection until a vehicle-specific severity mapping exists.
-
-Availability assumes current status persists and excludes service due by each horizon; it does not estimate return-to-service times or shift changes. Unknown risk is displayed separately and does not itself block a vehicle that passes all current readiness checks. Hospital grouping is a coverage proxy, not a geographic travel-time analysis. Fault charts count codes newly appearing relative to the previous known scan; an unknown initial scan is not treated as a new fault.
-
-## Verify
+Use Node 22.12+ and PostgreSQL. In `backend`, install dependencies and configure `.env` from `.env.example` without overwriting existing connection details.
 
 ```sh
 cd backend
-npm test
-node integration-check.js
-node --test ../simulator/simulator.test.js
+npm install
+npm run migrate
+npm run seed
+node bootstrap.js --simulator
+npm start
 ```
 
-The integration check creates and drops its own temporary schema in the configured database. It needs schema-creation permission and does not modify production fleet rows.
+`seed` adds only missing demo vehicles. `bootstrap` creates the first administrator only when no accounts exist. Its generated credentials are saved to ignored `backend/.initial-login` with owner-only permissions, never printed. The `--simulator` flag provisions per-vehicle credentials in ignored `simulator/devices.json`; existing device registrations are retained. Real devices are enrolled through Administration. The old shared `ADMIN_TOKEN` is no longer used.
+
+In another terminal:
 
 ```sh
 cd frontend
-npm run build
-npm run lint
+npm install
+npm run dev
 ```
 
-Database migrations are additive and preserve existing readings. Legacy timestamp-without-time-zone observations use the database's configured timezone during backfill; confirm that timezone matches the original installation before migrating another deployment. Back up an existing deployment before a production migration.
+Optional `frontend/.env`: `VITE_API_URL=http://localhost:5000`.
 
-## Dashboard workspaces
+From the repository root:
 
-- **Operations:** fleet totals, search and hospital filters, map and attention queue. Select a vehicle to investigate it.
-- **Vehicle:** a selected-vehicle workspace with Telemetry, Trends, Journey history, Faults and Maintenance tabs.
-- **Maintenance:** a prioritized worklist for inspection holds, overdue service, missing schedules and upcoming service, with access to recorded repairs and clearance actions.
-- **Dispatch:** incident coordinates, eligible candidates, exclusion reasons and links to review vehicle evidence. Coordinates remain in memory when switching workspaces.
-- **Planning:** hospital coverage minimums and availability scenarios.
+```sh
+node simulator/simulator.js
+```
 
-Hash navigation supports direct links (for example `#vehicle/1/trends`) and browser Back/Forward. The interface retains the white and `#f54242` palette. These are CHAP workspace designs informed by SCAS's publicly documented IVM approach, not a reproduction of its private interface.
+Sign in, record real service schedules for the vehicles, and use the workspaces. Service history is never fabricated for the existing fleet. Sessions expire after eight hours and are held only in browser memory, so refreshing requires signing in again. Use TLS when deployed beyond localhost.
+
+## Workspaces and roles
+
+| Workspace | Function |
+| --- | --- |
+| Operations | Fleet totals, map, hospital/status/search filters and attention queue |
+| Vehicle | Telemetry, trends, journey history, faults, maintenance and activity timeline |
+| Maintenance | Job creation, technician assignment, expected completion, job progress, service records and inspection clearance |
+| Dispatch | Incident creation, ranked recommendations, atomic vehicle assignment and mission progression |
+| Planning | Hospital coverage, configurable coverage points and conservative availability scenarios |
+| Alerts | Acknowledgment, in-app supervisor escalation and recent resolved history |
+| Administration | Individual accounts, roles, vehicle registration, hospital/status updates and device key rotation/revocation |
+
+- **Admin:** all actions, including account management and coverage configuration.
+- **Dispatcher:** incident creation/assignment/progression, recommendations and alert actions.
+- **Mechanic:** maintenance jobs, service records, inspection clearance and alert actions.
+- **Viewer:** read-only operational information.
+
+Permissions are enforced by the API. Passwords use salted scrypt hashes; session and device tokens are stored hashed. Account changes revoke active sessions. The last active administrator cannot be disabled or demoted. Write attribution comes from the authenticated account, not a submitted operator name.
+
+## Workflow rules
+
+- Assignment locks the incident and vehicle, rechecks readiness, and marks the vehicle responding. A unique active-assignment constraint prevents double assignment.
+- Missions follow open → assigned → en route → on scene → transporting/completed. Allowed cancellation paths are explicit. Completion releases the vehicle; existing inspection holds and readiness failures still prevent dispatch.
+- Starting a maintenance job marks the vehicle in maintenance and rejects vehicles on a mission. Completion requires a matching service record created since that job opened. Multiple concurrent jobs must finish before the vehicle becomes available. Cancelling an in-progress repair leaves the vehicle in maintenance for explicit administrator review.
+- Healthy readings resolve threshold alerts, but do not clear inspection holds. Clearance requires a mechanic/admin, notes, live normal telemetry, a fault scan and a service schedule.
+- Alert acknowledgment does not resolve a fault or clear a hold. Escalation records a supervisor-review flag in the inbox; it does not send an email or external notification. A severity change resets acknowledgment.
+- Activity history combines persistent audits, telemetry alerts, inspection holds/clearances and service records. Lists show the most recent 200 jobs/incidents or 300 alerts/timeline events.
+
+## Intelligence and integrations
+
+Readiness uses weighted prototype rules with explicit missing-data handling and mechanical exclusions. LIVE is up to 15 seconds, DELAYED up to 60 seconds, then OFFLINE; unknown observations remain UNKNOWN. Event IDs deduplicate retries, late measurements cannot replace newer state, and simulator events persist across restart.
+
+The synthetic model is **advisory only**, including HIGH risk results. It cannot veto or approve dispatch, alter ranking, or reduce forecast availability. Forecasts are conservative scenarios; scheduled repair returns are shown separately and never treated as completed repairs. They are not calibrated failure probabilities or shift forecasts.
+
+Road routing is supported through an optional private OSRM service configured by `ROUTING_URL`. Without it, distances are clearly labelled approximate and road coverage remains unknown. See [hardware and model instructions](HARDWARE_AND_MODEL.md) for enrollment, units, routing, real-data export, candidate training and remaining validation requirements.
+
+## API groups
+
+- `/api/auth/login`, `/api/auth/logout`, `/api/auth/me`
+- `/api/users` — account administration
+- `/api/ambulances` — fleet reads, registration and updates
+- `/api/ambulances/:id/device`, `/device/revoke` — device enrollment/revocation
+- `/api/readings` — authenticated per-device ingestion
+- `/api/ambulances/:id/latest`, `/history`, `/trends`, `/timeline`
+- `/api/ambulances/:id/maintenance`, `/clear-inspection`
+- `/api/work-orders`, `/:id`, `/:id/transition`
+- `/api/incidents`, `/:id/assign`, `/:id/transition`
+- `/api/dispatch/recommendations`
+- `/api/alerts`, `/:id/action`
+- `/api/fleet/coverage`, `/api/fleet/availability`, `/api/coverage-points`
+
+All operational reads require a user session. Telemetry requires a device key tied to the submitted ambulance ID. `/api/health` exposes only database availability. Hash navigation supports direct vehicle links and browser Back/Forward.
+
+## Checks
+
+```sh
+npm test --prefix backend
+node backend/integration-check.js
+node --test simulator/simulator.test.js
+npm run build --prefix frontend
+npm run lint --prefix frontend
+```
+
+Integration tests create/drop an isolated schema and require schema-creation privileges. They do not modify live fleet rows. Optional browser checks require Playwright and Chromium/Chrome:
+
+```sh
+PLAYWRIGHT_MODULE=/path/to/playwright CHROME_PATH=/usr/bin/google-chrome node backend/browser-check.js
+```
+
+Build the frontend before browser checks. Browser tests also use an isolated schema and exercise actual API workflows. The test intercepts the default localhost:5000 API origin to reach its temporary server.
+
+Migrations are additive; review/back up production data before deployment. Legacy timestamps use the database timezone for backfill. This implementation is informed by publicly documented SCAS IVM concepts, not a copy of its private systems or a connection to NHS services.
