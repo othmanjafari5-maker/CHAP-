@@ -72,10 +72,12 @@ function assess(row, history = [], now = Date.now()) {
   const exclusions = [...reasons];
   if (row.hold_id) exclusions.push('Inspection required');
   if (row.status !== 'available') exclusions.push(`Vehicle ${row.status}`);
+  if(!row.crew_shift_id)exclusions.push('No available crew on an active shift');
+  if(!row.crew_check_passed)exclusions.push('Pre-dispatch checklist missing, expired or failed');
   const label = !complete ? 'UNKNOWN' : row.hold_id || current.some(a => a.severity === 'CRITICAL') || conn.status !== 'LIVE' || score < 60 || overdue ? 'NOT RECOMMENDED FOR DISPATCH' : score < 80 || current.length ? 'WARNING' : 'READY';
   return { ...row, connection: conn, readiness: { score: complete ? Math.round(score) : null, complete, label, reasons, ruleVersion: 'prototype-1' },
     safety: { inspectionRequired: !!row.hold_id, holdId: row.hold_id, reason: row.hold_reason }, risk: predicted,
-    dispatch: { eligible: label === 'READY' && row.status === 'available', exclusionReasons: exclusions },
+    dispatch: { eligible: label === 'READY' && row.status === 'available' && !!row.crew_shift_id && !!row.crew_check_passed, exclusionReasons: exclusions },
     effective_status: row.hold_id ? 'INSPECTION REQUIRED' : row.status, alerts: current,
     active_alerts: current.length, critical_alerts: current.filter(a => a.severity === 'CRITICAL').length };
 }

@@ -12,7 +12,7 @@ function install(app,fleet){
     const b=req.body,username=text(b.username,'Username',60).toLowerCase();
     if(!/^[a-z0-9_.-]+$/.test(username))throw problem('Username must use letters, numbers, dots, underscores or hyphens');
     const encoded=await passwordHash(b.password);
-    const result=await tx(async db=>{const r=await db.query('INSERT INTO app_users(username,display_name,password_hash,role) VALUES ($1,$2,$3,$4) RETURNING id,username,display_name,role,active',[username,text(b.displayName,'Name',100),encoded,choice(b.role,['admin','dispatcher','mechanic','viewer'])]);await audit(db,req.user,'USER_CREATED','user',r.rows[0].id,null,{role:b.role});return r.rows[0];});res.status(201).json(result);
+    const result=await tx(async db=>{const r=await db.query('INSERT INTO app_users(username,display_name,password_hash,role) VALUES ($1,$2,$3,$4) RETURNING id,username,display_name,role,active',[username,text(b.displayName,'Name',100),encoded,choice(b.role,['admin','dispatcher','mechanic','viewer','crew'])]);await audit(db,req.user,'USER_CREATED','user',r.rows[0].id,null,{role:b.role});return r.rows[0];});res.status(201).json(result);
   });
   app.patch('/api/users/:id',roles('admin'),async(req,res)=>{
     const userId=positive(req.params.id),b=req.body;
@@ -20,12 +20,12 @@ function install(app,fleet){
     const result=await tx(async db=>{
       await db.query('LOCK TABLE app_users IN SHARE ROW EXCLUSIVE MODE');
       const old=(await db.query('SELECT * FROM app_users WHERE id=$1',[userId])).rows[0];if(!old)throw problem('User not found',404);
-      const role=b.role===undefined?old.role:choice(b.role,['admin','dispatcher','mechanic','viewer']);
+      const role=b.role===undefined?old.role:choice(b.role,['admin','dispatcher','mechanic','viewer','crew']);
       if(b.active!==undefined&&typeof b.active!=='boolean')throw problem('Invalid account status');
       const active=b.active??old.active;
       if(old.role==='admin'&&old.active&&(!active||role!=='admin')&&Number((await db.query("SELECT COUNT(*) FROM app_users WHERE role='admin' AND active")).rows[0].count)<=1)throw problem('Keep at least one active administrator',409);
       const r=await db.query('UPDATE app_users SET role=$2,active=$3,password_hash=COALESCE($4,password_hash) WHERE id=$1 RETURNING id,username,display_name,role,active',[userId,role,active,encoded]);
-      await db.query('DELETE FROM sessions WHERE user_id=$1',[userId]);await audit(db,req.user,'USER_UPDATED','user',userId,null,{role,active,passwordReset:!!encoded});return r.rows[0];
+      await db.query('DELETE FROM sessions WHERE user_id=$1',[userId]);await db.query('UPDATE password_recoveries SET used_at=NOW() WHERE user_id=$1 AND used_at IS NULL',[userId]);await audit(db,req.user,'USER_UPDATED','user',userId,null,{role,active,passwordReset:!!encoded});return r.rows[0];
     });res.json(result);
   });
   app.post('/api/ambulances',roles('admin'),async(req,res)=>{
@@ -52,7 +52,7 @@ function install(app,fleet){
   app.post('/api/ambulances/:id/device/revoke',roles('admin'),async(req,res)=>{
     await tx(async db=>{const a=await vehicleLock(db,req.params.id);await db.query('UPDATE devices SET active=FALSE WHERE ambulance_id=$1',[a.id]);await audit(db,req.user,'DEVICE_REVOKED','device',a.id,a.id);});res.json({message:'Device access revoked'});
   });
-  app.get('/api/incidents',roles(),async(req,res)=>res.json((await pool.query('SELECT i.*,a.ambulance_code FROM incidents i LEFT JOIN ambulances a ON a.id=i.ambulance_id ORDER BY i.created_at DESC LIMIT 200')).rows));
+  app.get('/api/incidents',roles(),async(req,res)=>res.json((await pool.query(`SELECT i.*,a.ambulance_code FROM incidents i LEFT JOIN ambulances a ON a.id=i.ambulance_id ORDER BY (i.status NOT IN ('completed','cancelled')) DESC,i.created_at DESC,i.id DESC LIMIT 200`)).rows));
   app.post('/api/incidents',roles('admin','dispatcher'),async(req,res)=>{
     const b=req.body;
     if(typeof b.latitude!=='number'||typeof b.longitude!=='number'||!Number.isFinite(b.latitude)||!Number.isFinite(b.longitude)||Math.abs(b.latitude)>90||Math.abs(b.longitude)>180)throw problem('Valid incident coordinates required');
@@ -67,22 +67,35 @@ function install(app,fleet){
       if(!current.dispatch.eligible)throw problem(`Vehicle is not eligible: ${current.dispatch.exclusionReasons.join('; ')}`,409);
       if((await db.query("SELECT 1 FROM work_orders WHERE ambulance_id=$1 AND status='in_progress'",[a.id])).rowCount)throw problem('Maintenance in progress',409);
       await db.query("UPDATE ambulances SET status='responding' WHERE id=$1",[a.id]);
-      const r=await db.query("UPDATE incidents SET ambulance_id=$2,status='assigned',updated_at=NOW() WHERE id=$1 RETURNING *",[incident.id,a.id]);
+      const r=await db.query("UPDATE incidents SET ambulance_id=$2,driver_id=$3,status='assigned',updated_at=NOW() WHERE id=$1 RETURNING *",[incident.id,a.id,current.driver_id]);
       await audit(db,req.user,'INCIDENT_ASSIGNED','incident',incident.id,a.id,{reference:incident.reference});return r.rows[0];
     }));
   });
-  app.post('/api/incidents/:id/transition',roles('admin','dispatcher'),async(req,res)=>{
+  app.post('/api/incidents/:id/crew',roles('admin','dispatcher'),async(req,res)=>{
+    res.json(await tx(async db=>{
+      const incident=(await db.query('SELECT * FROM incidents WHERE id=$1 FOR UPDATE',[positive(req.params.id)])).rows[0];
+      if(!incident||incident.status!=='assigned'||!incident.ambulance_id)throw problem('Only an assigned mission awaiting departure can update its crew',409);
+      await vehicleLock(db,incident.ambulance_id);
+      const a=(await fleet(db)).find(v=>v.id===incident.ambulance_id);
+      if(!a?.crew_shift_id||!a.crew_check_passed)throw problem('An active crew shift and passed checklist are required',409);
+      const r=await db.query('UPDATE incidents SET driver_id=$2,acknowledged_at=NULL,acknowledged_by=NULL,acknowledgment_escalated_at=NULL,updated_at=NOW() WHERE id=$1 RETURNING *',[incident.id,a.driver_id]);
+      await audit(db,req.user,'MISSION_CREW_CONFIRMED','incident',incident.id,incident.ambulance_id);return r.rows[0];
+    }));
+  });
+  app.post(['/api/incidents/:id/transition','/api/crew/incidents/:id/transition'],roles('admin','dispatcher','crew'),async(req,res)=>{
     res.json(await tx(async db=>{
       const incident=(await db.query('SELECT * FROM incidents WHERE id=$1 FOR UPDATE',[positive(req.params.id)])).rows[0];if(!incident)throw problem('Incident not found',404);
       const flow={open:['cancelled'],assigned:['en_route','cancelled'],en_route:['on_scene','cancelled'],on_scene:['transporting','completed','cancelled'],transporting:['completed'],completed:[],cancelled:[]};
+      if(req.user.role==='crew'&&(incident.driver_id!==req.user.id||req.body.status==='cancelled'))throw problem('You cannot update this mission',403);
       const next=choice(req.body.status,flow[incident.status]);
+      if(next==='en_route'&&!incident.acknowledged_at)throw problem('The assigned crew must acknowledge the mission before departure',409);
       const notes=text(req.body.notes,'Transition notes',2000);
       if(incident.ambulance_id){await vehicleLock(db,incident.ambulance_id);if(['completed','cancelled'].includes(next))await db.query("UPDATE ambulances SET status='available' WHERE id=$1",[incident.ambulance_id]);}
       const r=await db.query("UPDATE incidents SET status=$2,updated_at=NOW(),completed_at=CASE WHEN $2 IN ('completed','cancelled') THEN NOW() ELSE NULL END WHERE id=$1 RETURNING *",[incident.id,next]);
       await audit(db,req.user,'INCIDENT_STATUS_CHANGED','incident',incident.id,incident.ambulance_id,{from:incident.status,to:next,notes});return r.rows[0];
     }));
   });
-  app.get('/api/work-orders',roles(),async(req,res)=>res.json((await pool.query('SELECT w.*,a.ambulance_code,u.display_name AS technician FROM work_orders w JOIN ambulances a ON a.id=w.ambulance_id LEFT JOIN app_users u ON u.id=w.technician_id ORDER BY w.created_at DESC LIMIT 200')).rows));
+  app.get('/api/work-orders',roles(),async(req,res)=>res.json((await pool.query(`SELECT w.*,a.ambulance_code,u.display_name AS technician FROM work_orders w JOIN ambulances a ON a.id=w.ambulance_id LEFT JOIN app_users u ON u.id=w.technician_id ORDER BY (w.status NOT IN ('completed','cancelled')) DESC,w.created_at DESC,w.id DESC LIMIT 200`)).rows));
   app.post('/api/work-orders',roles('admin','mechanic'),async(req,res)=>{
     const b=req.body;res.status(201).json(await tx(async db=>{
       const a=await vehicleLock(db,b.ambulanceId);

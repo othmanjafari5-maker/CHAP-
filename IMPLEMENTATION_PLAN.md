@@ -1,4 +1,4 @@
-# CHAP missing-feature review and implementation plan
+# WAHI missing-feature review and implementation plan
 
 > Historical review: implementation has since been added. See `README.md` for the current features, setup, tests and prototype limitations.
 

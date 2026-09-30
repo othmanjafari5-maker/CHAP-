@@ -11,9 +11,9 @@ async function run(){
   if(!(await pool.query('SELECT 1 FROM app_users LIMIT 1')).rowCount){
     const password=crypto.randomBytes(18).toString('base64url');
     await pool.query("INSERT INTO app_users(username,display_name,password_hash,role) VALUES ('admin','Administrator',$1,'admin')",[await passwordHash(password)]);
-    const target=path.join(__dirname,'.initial-login');
+    const target=process.env.INITIAL_LOGIN_FILE||path.join(__dirname,'.initial-login');
     fs.writeFileSync(target,`Username: admin\nPassword: ${password}\n`,{mode:0o600});
-    console.log('Initial administrator credentials saved to backend/.initial-login (not printed).');
+    console.log(`Initial administrator credentials saved to ${target} (not printed).`);
   }else console.log('Accounts already exist; credentials unchanged.');
   if(process.argv.includes('--simulator')){
     const target=path.join(__dirname,'../simulator/devices.json');

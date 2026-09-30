@@ -1,0 +1,16 @@
+.git
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+**/.initial-login
+**/devices.json
+**/pending-readings.json*
+**/__pycache__
+**/*.log
+pic
+secrets
+backups
+ml/review-windows.csv
+ml/candidate*.json
+ml/evaluation.json

@@ -8,7 +8,7 @@ const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 
 test('simulator preserves queued event IDs across offline restart', { timeout: 20000 }, async () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'chap-simulator-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wahi-simulator-'));
   const devicesFile = path.join(directory, 'devices.json');
   fs.writeFileSync(devicesFile, JSON.stringify(Object.fromEntries([1,2,3].map(id=>[`AMB-00${id}`,{id,token:`test-device-${id}`}]))));
   const queueFile = path.join(directory, 'queue.json');

@@ -1,4 +1,4 @@
-export const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+export const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:5000');
 let accessToken = '';
 export function setAccessToken(value) { accessToken = value; }
 export async function request(path, options = {}) {
@@ -6,7 +6,7 @@ export async function request(path, options = {}) {
   const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
   const response = await fetch(`${API_URL}${path}`, { ...options, signal, headers: { ...options.headers, ...(accessToken ? {Authorization: `Bearer ${accessToken}`} : {}) } });
   const body = await response.json();
-  if (response.status === 401 && accessToken) window.dispatchEvent(new Event('chap-session-expired'));
+  if (response.status === 401 && accessToken) window.dispatchEvent(new Event('wahi-session-expired'));
   if (!response.ok) throw new Error(body.message || 'Request failed');
   return body;
 }

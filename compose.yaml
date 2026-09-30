@@ -1,0 +1,86 @@
+name: wahi
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: wahi
+      POSTGRES_USER: wahi
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    volumes: [database:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U wahi -d wahi']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: &logging
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+  api:
+    build: {context: ., dockerfile: deploy/Dockerfile.api}
+    restart: unless-stopped
+    init: true
+    environment: &environment
+      NODE_ENV: production
+      DB_HOST: db
+      DB_PORT: '5432'
+      DB_NAME: wahi
+      DB_USER: wahi
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      PORT: '5000'
+      TRUST_PROXY: '1'
+      ACCESS_LOG: 'true'
+      UI_ORIGIN: https://${SITE_ADDRESS:?Set SITE_ADDRESS in .env}
+      ROUTING_URL: ${ROUTING_URL:-}
+      NOTIFICATION_WEBHOOK_URL: ${NOTIFICATION_WEBHOOK_URL:-}
+      NOTIFICATION_WEBHOOK_SECRET: ${NOTIFICATION_WEBHOOK_SECRET:-}
+      ALERT_ESCALATION_MINUTES: ${ALERT_ESCALATION_MINUTES:-10}
+      INITIAL_LOGIN_FILE: /tmp/.initial-login
+    secrets: [db_password]
+    depends_on:
+      db: {condition: service_healthy}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 20s
+    logging: *logging
+  worker:
+    build: {context: ., dockerfile: deploy/Dockerfile.api}
+    command: [node, notification-worker.js]
+    restart: unless-stopped
+    init: true
+    environment: *environment
+    secrets: [db_password]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, node, -e, "const p=require('./db');p.query(\"SELECT 1 FROM worker_heartbeats WHERE name='notifications' AND last_seen_at>NOW()-INTERVAL '2 minutes'\").then(r=>{if(!r.rowCount)process.exitCode=1}).catch(()=>process.exitCode=1).finally(()=>p.end())"]
+      interval: 30s
+      timeout: 8s
+      start_period: 30s
+      retries: 3
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 20s
+    logging: *logging
+  web:
+    build: {context: ., dockerfile: deploy/Dockerfile.web}
+    restart: unless-stopped
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?Set SITE_ADDRESS in .env}
+    ports: ['80:80', '443:443', '443:443/udp']
+    volumes: [caddy_data:/data, caddy_config:/config]
+    depends_on:
+      api: {condition: service_healthy}
+    logging: *logging
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt
+volumes:
+  database:
+  caddy_data:
+  caddy_config:

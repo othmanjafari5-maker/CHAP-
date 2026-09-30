@@ -2,7 +2,7 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {assess,connection,features,distance,numeric}=require('./intelligence');
 const now=Date.now();
-const healthy={status:'available',recorded_at:new Date(now).toISOString(),fuel_level:80,battery_voltage:12.7,engine_temperature:86,vibration:1,fault_codes:[],odometer_km:1000,next_service_km:2000,next_service_date:new Date(now+86400000).toISOString()};
+const healthy={crew_shift_id:1,crew_check_passed:true,status:'available',recorded_at:new Date(now).toISOString(),fuel_level:80,battery_voltage:12.7,engine_temperature:86,vibration:1,fault_codes:[],odometer_km:1000,next_service_km:2000,next_service_date:new Date(now+86400000).toISOString()};
 test('complete healthy vehicle is ready',()=>{const a=assess(healthy,[],now);assert.equal(a.readiness.score,100);assert.equal(a.dispatch.eligible,true);});
 test('unknown sensors never become healthy zeroes',()=>{const a=assess({...healthy,battery_voltage:null},[],now);assert.equal(a.readiness.score,null);assert.equal(a.dispatch.eligible,false);});
 test('critical temperature overrides average score',()=>{const a=assess({...healthy,engine_temperature:110},[],now);assert.equal(a.readiness.score,80);assert.equal(a.dispatch.eligible,false);});
@@ -16,3 +16,5 @@ test('coercible nonnumeric values are rejected',()=>{for(const value of [true,fa
 test('mileage-based service requires a current odometer',()=>assert.equal(assess({...healthy,odometer_km:null},[],now).dispatch.eligible,false));
 
 test('demo predictions cannot veto otherwise eligible vehicles',()=>{const history=Array.from({length:120},(_,i)=>({recorded_at:new Date(now-(120-i)*5000).toISOString(),battery_voltage:11-i*.001,engine_temperature:110,vibration:4+i*.01,fault_codes:['P0300']}));const a=assess(healthy,history,now);assert.equal(a.dispatch.eligible,true);assert.ok(!a.dispatch.exclusionReasons.some(r=>r.includes('demo')));});
+
+test('dispatch requires current crew and a passed checklist',()=>{for(const change of [{crew_shift_id:null},{crew_check_passed:false}])assert.equal(assess({...healthy,...change},[],now).dispatch.eligible,false);});

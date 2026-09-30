@@ -48,7 +48,7 @@ Synthetic predictions are advisory only. They do not change dispatch eligibility
 Export historical device windows locally:
 
 ```sh
-node ml/export.js /tmp/chap-review-windows.csv
+node ml/export.js /tmp/wahi-review-windows.csv
 ```
 
 This exports the last 90 days of device-source windows whose seven-day outcome period has elapsed. Simulator rows are excluded. The six features use only observations available at each prediction timestamp, matching the existing inference feature function. CSV output intentionally has blank `failure_within_7_days`, `verified_through` and `outcome_verified` columns. A reviewer must confirm outcomes from real maintenance/failure records and follow-up. Absence of a failure record alone must not be labelled a verified negative.
@@ -56,7 +56,7 @@ This exports the last 90 days of device-source windows whose seven-day outcome p
 Train a separate research candidate:
 
 ```sh
-python3 ml/train_real.py /tmp/chap-review-windows.csv --output /tmp/chap-candidate.json
+python3 ml/train_real.py /tmp/wahi-review-windows.csv --output /tmp/wahi-candidate.json
 ```
 
 Required reviewed labels: `failure_within_7_days` is 0 or 1; `outcome_verified` is `yes`; `verified_through` covers the complete following seven days. Timestamps must include timezones. The pipeline requires at least 100 reviewed windows across five vehicles, then enforces disjoint training/test vehicles, a chronological cutoff, a seven-day label gap and examples of both outcomes in each split. It fails explicitly if evidence is insufficient.

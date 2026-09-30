@@ -9,7 +9,7 @@ let sessionToken;
 const deviceToken=crypto.randomBytes(24).toString('hex');
 const {app}=require('./server');
 const migrate=require('./migrate');
-const schema=`chap_test_${Date.now()}`;
+const schema=`wahi_test_${Date.now()}`;
 let server, schemaCreated=false;
 async function run(){
   await pool.query(`CREATE SCHEMA ${schema}`);
@@ -19,6 +19,9 @@ async function run(){
   await pool.query("INSERT INTO ambulances (ambulance_code,status,hospital_name) VALUES ('TEST-1','available','Test Hospital')");
   await pool.query("INSERT INTO app_users(username,display_name,password_hash,role) VALUES ('tester','Test operator',$1,'admin')",[await passwordHash('test-password-long-123')]);
   await pool.query("INSERT INTO devices(ambulance_id,name,token_hash) VALUES (1,'Test device',$1)",[hash(deviceToken)]);
+  await pool.query("INSERT INTO app_users(username,display_name,password_hash,role) VALUES ('crew','Test Crew',$1,'crew')",[await passwordHash('test-password-long-123')]);
+  await pool.query("INSERT INTO crew_shifts(ambulance_id,driver_id,clinical_crew,starts_at,ends_at,created_by) SELECT 1,id,'Test clinician',NOW()-INTERVAL '1 hour',NOW()+INTERVAL '8 hours',1 FROM app_users WHERE username='crew'");
+  await pool.query("INSERT INTO readiness_checks(shift_id,oxygen,equipment,cleaning,communications,crew_present,checked_by,expires_at) VALUES(1,true,true,true,true,true,1,NOW()+INTERVAL '8 hours')");
   server=app.listen(0,'127.0.0.1');
   await new Promise(resolve=>server.once('listening',resolve));
   const base=`http://127.0.0.1:${server.address().port}`;
@@ -80,6 +83,9 @@ async function workflowChecks(call,reading,maintenance){
   const assigned=assignments[0].status===200?incident:second;
   assert.equal((await call('/api/ambulances/1',{status:'available'},true,'PATCH')).status,409);
   assert.equal((await call(`/api/incidents/${assigned.id}/transition`,{status:'completed',notes:'Invalid skipped states'})).status,400);
+  assert.equal((await call(`/api/incidents/${assigned.id}/transition`,{status:'en_route',notes:'Departure'})).status,409);
+  const dispatcherSession=sessionToken;sessionToken=(await call('/api/auth/login',{username:'crew',password:'test-password-long-123'},false)).body.token;
+  assert.equal((await call(`/api/crew/incidents/${assigned.id}/acknowledge`,{})).status,200);sessionToken=dispatcherSession;
   for(const status of ['en_route','on_scene','completed'])assert.equal((await call(`/api/incidents/${assigned.id}/transition`,{status,notes:'Integration transition'})).status,200);
   const job=(await call('/api/work-orders',{ambulanceId:1,title:'Test repair',technicianId:1,expectedCompletion:new Date(Date.now()+86400000).toISOString()})).body;
   assert.equal((await call(`/api/work-orders/${job.id}/transition`,{status:'in_progress',notes:'Repair started'})).status,200);

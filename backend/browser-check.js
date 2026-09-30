@@ -7,7 +7,7 @@ const pool=require('./db');pool.options.max=1;
 const {passwordHash,hash}=require('./security');
 const {app}=require('./server');
 const migrate=require('./migrate');
-const schema=`chap_browser_${Date.now()}`;
+const schema=`wahi_browser_${Date.now()}`;
 let server,browser,lastPage,heartbeat,created=false,pending=Promise.resolve();
 async function run(){
   await pool.query(`CREATE SCHEMA ${schema}`);created=true;await pool.query(`SET search_path TO ${schema}`);await migrate();
@@ -16,6 +16,9 @@ async function run(){
   await pool.query("INSERT INTO ambulances(ambulance_code,registration_number,hospital_name,status) VALUES ('TEST-UI','UI-123','Browser Hospital','available')");
   await pool.query("INSERT INTO devices(ambulance_id,name,token_hash) VALUES (1,'Browser device',$1)",[hash('browser-device-key')]);
   await pool.query("INSERT INTO maintenance_records(ambulance_id,service_date,odometer_km,repair_type,next_service_date,next_service_km,created_by) VALUES(1,CURRENT_DATE,1000,'Routine inspection',CURRENT_DATE+30,5000,'Browser Operator')");
+  await pool.query("INSERT INTO app_users(username,display_name,password_hash,role) VALUES ('crew','Test Crew',$1,'crew')",[await passwordHash('browser-test-password-123')]);
+  await pool.query("INSERT INTO crew_shifts(ambulance_id,driver_id,clinical_crew,starts_at,ends_at,created_by) SELECT 1,id,'Test clinician',NOW()-INTERVAL '1 hour',NOW()+INTERVAL '8 hours',1 FROM app_users WHERE username='crew'");
+  await pool.query("INSERT INTO readiness_checks(shift_id,oxygen,equipment,cleaning,communications,crew_present,checked_by,expires_at) VALUES(1,true,true,true,true,true,1,NOW()+INTERVAL '8 hours')");
   const express=require('express');app.use('/assets',express.static(path.join(__dirname,'../frontend/dist/assets')));app.use('/ui',express.static(path.join(__dirname,'../frontend/dist')));
   server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));const base=`http://127.0.0.1:${server.address().port}`;
   const reading={ambulanceId:1,latitude:-6.16,longitude:35.75,speed:0,rpm:800,engineTemperature:86,batteryVoltage:12.7,fuelLevel:80,vibration:1,faultCodes:[],odometerKm:1000};
@@ -38,6 +41,8 @@ async function run(){
   await page.getByLabel('Latitude',{exact:true}).fill('-6.163');await page.getByLabel('Longitude',{exact:true}).fill('35.7516');await page.getByRole('button',{name:'Create incident',exact:true}).click();
   await page.getByRole('button',{name:'Find suitable vehicles'}).click();await page.getByRole('button',{name:'Assign vehicle',exact:true}).click();
   await page.getByText('Vehicle assigned. Mission is now active.').waitFor();
+  const crewContext=await browser.newContext({viewport:{width:390,height:844}});const crewPage=await crewContext.newPage();await crewPage.goto(base+'/ui/');await crewPage.getByLabel('Username',{exact:true}).fill('crew');await crewPage.getByLabel('Password',{exact:true}).fill('browser-test-password-123');await crewPage.getByRole('button',{name:'Sign in',exact:true}).click();await crewPage.getByRole('heading',{name:'Crew workspace',exact:true}).waitFor();
+  await crewPage.getByRole('button',{name:'Acknowledge mission'}).click();await crewPage.getByRole('button',{name:'Update mission',exact:true}).waitFor();assert.equal(await crewPage.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1),true);await crewContext.close();
   for(const status of ['en_route','on_scene','completed']){
     const select=page.getByLabel('Next state');await page.waitForFunction(s=>Array.from(document.querySelectorAll('select[name="status"] option')).some(o=>o.value===s),status);await select.selectOption(status);await page.getByLabel('Progress / closure notes').fill('Browser verified transition');
     const response=page.waitForResponse(r=>r.url().includes('/transition')&&r.status()===200);await page.getByRole('button',{name:'Update mission'}).click();await response;
@@ -51,12 +56,19 @@ async function run(){
   await page.getByLabel('Manage vehicle').selectOption({label:'SECOND-UI'});
   await page.getByRole('link',{name:'Planning',exact:true}).click();await page.getByRole('heading',{name:'Road response coverage'}).waitFor();
   await page.getByRole('link',{name:'Alert inbox',exact:true}).click();await page.getByRole('heading',{name:'Alert inbox'}).first().waitFor();
+  await page.getByRole('link',{name:'Notifications',exact:true}).click();await page.getByRole('heading',{name:'Notification inbox'}).waitFor();
+  const mark=page.getByRole('button',{name:'Mark as read'}).first();await mark.waitFor();const read=page.waitForResponse(r=>r.url().includes('/read')&&r.status()===200);await mark.click();await read;
+  await page.getByRole('link',{name:'Reports',exact:true}).click();await page.getByRole('button',{name:'View report',exact:true}).click();await page.getByRole('button',{name:'Download CSV'}).waitFor();
+  const download=page.waitForEvent('download');await page.getByRole('button',{name:'Download CSV'}).click();assert.match((await download).suggestedFilename(),/^wahi-incidents-/);
+  await page.getByRole('link',{name:'My account',exact:true}).click();await page.getByLabel('Current password').waitFor();
   await page.getByRole('link',{name:'Operations overview',exact:true}).click();await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1),true,'Mobile layout must not overflow');
-  await page.screenshot({path:'/tmp/chap-mobile.png',fullPage:true});
+  await page.screenshot({path:'/tmp/wahi-mobile.png',fullPage:true});
   await page.getByRole('button',{name:'Sign out',exact:true}).click();await page.getByLabel('Username',{exact:true}).fill('viewer');await page.getByLabel('Password',{exact:true}).fill('browser-test-password-123');await page.getByRole('button',{name:'Sign in',exact:true}).click();
   await page.getByRole('heading',{name:'Operations overview',exact:true}).waitFor();assert.equal(await page.getByRole('link',{name:'Administration',exact:true}).count(),0);
   await page.getByRole('link',{name:'Dispatch',exact:true}).click();assert.equal(await page.getByRole('button',{name:'Create incident',exact:true}).count(),0);
-  assert.deepEqual(errors,[]);console.log('Browser checks passed: login, tabs, mission assignment/progression, maintenance creation, fleet registration, planning, mobile layout, logout and viewer restrictions.');
+  await page.getByRole('link',{name:'My account',exact:true}).click();await page.getByLabel('Current password').fill('browser-test-password-123');await page.getByLabel('New password',{exact:true}).fill('browser-changed-password-123');await page.getByLabel('Confirm new password').fill('browser-changed-password-123');await page.getByRole('button',{name:'Change password and sign out'}).click();await page.getByRole('heading',{name:'Sign in',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Forgot password?'}).click();await page.getByLabel('Username',{exact:true}).fill('viewer');await page.getByRole('button',{name:'Request recovery'}).click();await page.getByText('If this account is active', {exact:false}).waitFor();
+  assert.deepEqual(errors,[]);console.log('Browser checks passed: login, tabs, mission assignment/progression, maintenance creation, fleet registration, planning, notifications, report download, account recovery, password change, crew acknowledgment, mobile layout, logout and viewer restrictions.');
 }
-run().catch(async e=>{if(lastPage)await lastPage.screenshot({path:'/tmp/chap-browser-failure.png',fullPage:true}).catch(()=>{});console.error(e);process.exitCode=1;}).finally(async()=>{clearInterval(heartbeat);await pending.catch(()=>{});if(browser)await browser.close();if(server)await new Promise(r=>server.close(r));if(created){await pool.query('SET search_path TO public');await pool.query(`DROP SCHEMA ${schema} CASCADE`);}await pool.end();});
+run().catch(async e=>{if(lastPage)await lastPage.screenshot({path:'/tmp/wahi-browser-failure.png',fullPage:true}).catch(()=>{});console.error(e);process.exitCode=1;}).finally(async()=>{clearInterval(heartbeat);await pending.catch(()=>{});if(browser)await browser.close();if(server)await new Promise(r=>server.close(r));if(created){await pool.query('SET search_path TO public');await pool.query(`DROP SCHEMA ${schema} CASCADE`);}await pool.end();});

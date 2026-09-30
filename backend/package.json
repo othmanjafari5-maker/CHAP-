@@ -8,7 +8,10 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "migrate": "node migrate.js",
-    "seed": "node seed.js"
+    "seed": "node seed.js",
+    "worker": "node notification-worker.js",
+    "check:integration": "node integration-check.js",
+    "check:experience": "node experience-check.js"
   },
   "keywords": [],
   "author": "",

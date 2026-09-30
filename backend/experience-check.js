@@ -1,0 +1,120 @@
+// Isolated database integration tests for account recovery, notifications and reports.
+require('dotenv').config({quiet:true,path:require('node:path').join(__dirname,'.env')});
+const assert=require('node:assert/strict');
+const http=require('node:http');
+const crypto=require('node:crypto');
+const pool=require('./db');pool.options.max=1;
+const {app}=require('./server');
+const {passwordHash,hash,audit}=require('./security');
+const {deliverOne,escalate,configuration}=require('./notifications');
+const {csv}=require('./experience');
+const schema=`wahi_experience_${Date.now()}`;let created=false,server,receiver,token;
+async function run(){
+ await pool.query(`CREATE SCHEMA ${schema}`);created=true;await pool.query(`SET search_path TO ${schema}`);await require('./migrate')();await require('./migrate')();
+ const encoded=await passwordHash('test-password-123');
+ await pool.query("INSERT INTO app_users(username,display_name,password_hash,role) VALUES ('admin','Test Admin',$1,'admin'),('viewer','Test Viewer',$1,'viewer')",[encoded]);
+ await pool.query("INSERT INTO ambulances(ambulance_code) VALUES ('TEST')");
+ server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));const base=`http://127.0.0.1:${server.address().port}`;
+ async function call(path,body,auth=true){const r=await fetch(base+path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json',...(auth?{Authorization:`Bearer ${token}`}:{})},body:body===undefined?undefined:JSON.stringify(body)});return {status:r.status,body:await r.json()};}
+ token=(await call('/api/auth/login',{username:'admin',password:'test-password-123'},false)).body.token;
+ assert.equal((await call('/api/notifications',undefined,false)).status,401);
+ // Rolled-back operational events must never enqueue a notification.
+ await pool.query('BEGIN');await audit(pool,{id:1,display_name:'Admin'},'INCIDENT_ASSIGNED','incident',1,1);await pool.query('ROLLBACK');
+ assert.equal(Number((await pool.query('SELECT COUNT(*) FROM notifications')).rows[0].count),0);
+ await pool.query("INSERT INTO vehicle_alerts(ambulance_id,alert_type,severity,message,created_at) VALUES (1,'temperature','CRITICAL','Hot engine',NOW()-INTERVAL '20 minutes')");
+ await pool.query("UPDATE vehicle_alerts SET sensor_value=110 WHERE id=1");
+ assert.equal(Number((await pool.query('SELECT COUNT(*) FROM notifications')).rows[0].count),1);
+ await escalate();await escalate();
+ assert.equal(Number((await pool.query('SELECT COUNT(*) FROM notifications')).rows[0].count),2);
+ const first=(await call('/api/notifications?limit=1')).body;assert.equal(first.rows.length,1);assert.equal(first.unreadCount,2);assert.ok(first.nextBefore);
+ const next=(await call(`/api/notifications?limit=1&before=${first.nextBefore}`)).body;assert.notEqual(next.rows[0].id,first.rows[0].id);assert.equal(next.nextBefore,null);
+ assert.equal((await call('/api/notifications?before=bad')).status,400);
+ assert.equal((await call(`/api/notifications/${first.rows[0].id}/read`,{})).status,200);
+ assert.equal((await call('/api/notifications?unread=true')).body.rows.length,1);
+ const admin=token;token=(await call('/api/auth/login',{username:'viewer',password:'test-password-123'},false)).body.token;
+ assert.equal((await call('/api/notifications')).body.unreadCount,2);
+ assert.equal((await call('/api/system/status')).status,403);
+ assert.equal((await call('/api/notification-deliveries/1/retry',{})).status,403);
+ token=admin;
+ // Local receiver only: exercise HMAC, retries, idempotency and redirect rejection.
+ let mode=503;const received=[];const secret='test-webhook-secret-at-least-32-characters';
+ receiver=http.createServer(async(req,res)=>{let body='';for await(const chunk of req)body+=chunk;received.push({headers:req.headers,body});res.writeHead(mode,mode===302?{Location:'/redirect'}:{});res.end();});receiver.listen(0,'127.0.0.1');await new Promise(r=>receiver.once('listening',r));
+ const config={url:`http://127.0.0.1:${receiver.address().port}`,secret};
+ assert.equal(await deliverOne(config),true);
+ let delivery=(await pool.query('SELECT * FROM notifications ORDER BY id LIMIT 1')).rows[0];assert.equal(delivery.delivery_status,'pending');assert.equal(delivery.last_error,'HTTP 503');assert.equal(delivery.attempts,1);
+ const receivedFirst=received[0];assert.equal(receivedFirst.headers['x-wahi-signature'],`sha256=${crypto.createHmac('sha256',secret).update(`${receivedFirst.headers['x-wahi-timestamp']}.${receivedFirst.body}`).digest('hex')}`);
+ assert.equal(JSON.parse(receivedFirst.body).application,'WAHI');assert.equal(JSON.parse(receivedFirst.body).title,undefined);
+ await pool.query('UPDATE notifications SET next_attempt_at=NOW() WHERE id=$1',[delivery.id]);mode=204;
+ await deliverOne(config);delivery=(await pool.query('SELECT * FROM notifications WHERE id=$1',[delivery.id])).rows[0];assert.equal(delivery.delivery_status,'delivered');assert.equal(received[0].headers['idempotency-key'],received[1].headers['idempotency-key']);
+ mode=302;await deliverOne(config);assert.equal(received.length,3,'Redirects must not be followed');
+ await pool.query("UPDATE notifications SET attempts=7,next_attempt_at=NOW() WHERE delivery_status='pending'");await deliverOne(config);
+ const failed=(await pool.query("SELECT * FROM notifications WHERE delivery_status='failed'")).rows[0];assert.ok(failed);
+ assert.equal((await call(`/api/notification-deliveries/${failed.id}/retry`,{})).status,200);
+ mode=204;await Promise.all([deliverOne(config),deliverOne(config)]);assert.equal(Number((await pool.query("SELECT COUNT(*) FROM notifications WHERE delivery_status='delivered'")).rows[0].count),2);
+ // A worker crash leaves a lease that a later worker can reclaim.
+ await pool.query("UPDATE notifications SET delivery_status='sending',leased_at=NOW()-INTERVAL '2 minutes',lease_token='abandoned' WHERE id=$1",[failed.id]);assert.equal(await deliverOne(config),true);
+ process.env.NOTIFICATION_WEBHOOK_URL='http://example.org';process.env.NOTIFICATION_WEBHOOK_SECRET=secret;assert.throws(configuration,/HTTPS/);delete process.env.NOTIFICATION_WEBHOOK_URL;delete process.env.NOTIFICATION_WEBHOOK_SECRET;
+ assert.equal(await deliverOne(null),false);
+ // Report cursors and CSV formula protection.
+ await pool.query("INSERT INTO incidents(reference,description,priority,latitude,longitude,created_by) SELECT 'REPORT-'||n,'Report test','standard',0,0,1 FROM generate_series(1,55) n");
+ const range='from=2020-01-01&to=2020-01-02';assert.equal((await call(`/api/reports/incidents?${range}`)).body.rows.length,0);
+ const from=new Date(Date.now()-86400000).toISOString(),to=new Date(Date.now()+86400000).toISOString(),query=`from=${from}&to=${to}`;
+ const report=(await call(`/api/reports/incidents?${query}`)).body;assert.equal(report.rows.length,50);assert.ok(report.nextBefore);
+ const older=(await call(`/api/reports/incidents?${query}&before=${report.nextBefore}`)).body;assert.equal(older.rows.length,5);assert.ok(!report.rows.some(r=>older.rows.some(o=>o.id===r.id)));
+ assert.equal((await call(`/api/reports/incidents?${query}&format=csv`)).body.count,55);
+ assert.equal((await call('/api/reports/incidents?from=bad&to=bad')).status,400);
+ assert.equal((await call('/api/reports/toString?'+query)).status,404);
+ assert.ok(csv([{a:'=HYPERLINK("x")',b:'line\nquote"'}],['a','b']).includes('"\'=HYPERLINK(""x"")"'));
+ // Recovery gives no account enumeration, requires admin and verified identity, expires and is one-use.
+ const missing=await call('/api/auth/recovery-request',{username:'missing'},false);
+ const known=await call('/api/auth/recovery-request',{username:'viewer'},false);assert.deepEqual(missing,known);
+ const request=(await call('/api/recovery-requests')).body[0];assert.ok(request);
+ assert.equal((await call(`/api/recovery-requests/${request.id}/issue`,{})).status,400);
+ let issued=(await call(`/api/recovery-requests/${request.id}/issue`,{identityVerified:true})).body;
+ assert.equal((await pool.query('SELECT token_hash FROM password_recoveries WHERE id=$1',[request.id])).rows[0].token_hash,hash(issued.code));
+ await pool.query("UPDATE password_recoveries SET expires_at=NOW()-INTERVAL '1 minute'");
+ assert.equal((await call('/api/auth/recover',{code:issued.code,password:'new-password-1234'},false)).status,400);
+ issued=(await call(`/api/recovery-requests/${request.id}/issue`,{identityVerified:true})).body;
+ const oldViewer=(await call('/api/auth/login',{username:'viewer',password:'test-password-123'},false)).body.token;
+ const recoveries=await Promise.all([call('/api/auth/recover',{code:issued.code,password:'new-password-1234'},false),call('/api/auth/recover',{code:issued.code,password:'new-password-1234'},false)]);assert.deepEqual(recoveries.map(r=>r.status).sort(),[200,400]);
+ token=oldViewer;assert.equal((await call('/api/auth/me')).status,401);
+ token=(await call('/api/auth/login',{username:'viewer',password:'new-password-1234'},false)).body.token;assert.ok(token);
+ assert.equal((await call('/api/auth/password',{currentPassword:'wrong',password:'changed-password-123'})).status,400);
+ assert.equal((await call('/api/auth/password',{currentPassword:'new-password-1234',password:'changed-password-123'})).status,200);
+ assert.equal((await call('/api/auth/me')).status,401);
+ assert.equal((await call('/api/auth/login',{username:'viewer',password:'changed-password-123'},false)).status,200);
+ // A bounded read-only load smoke check uses this isolated API and database.
+ const {spawn}=require('node:child_process');
+ await new Promise((resolve,reject)=>{const child=spawn(process.execPath,[require('node:path').join(__dirname,'load-check.js')],{env:{...process.env,WAHI_URL:base,WAHI_TOKEN:admin,WAHI_REQUESTS:'30',WAHI_CONCURRENCY:'3'},stdio:['ignore','pipe','pipe']});let output='';child.stdout.on('data',chunk=>{output+=chunk;});child.on('error',reject);child.on('exit',code=>{try{assert.equal(code,0);assert.equal(JSON.parse(output).failed,0);console.log('Read-only load smoke check:',output.trim());resolve();}catch(e){reject(e);}});});
+ // Crew access is scoped to the assigned shift and mission.
+ token=admin;
+ const crew1=(await call('/api/users',{username:'crew1',displayName:'Crew One',role:'crew',password:'crew-password-123'})).body;
+ const crew2=(await call('/api/users',{username:'crew2',displayName:'Crew Two',role:'crew',password:'crew-password-123'})).body;
+ const shiftBody={ambulanceId:1,driverId:crew1.id,clinicalCrew:'Test clinician',startsAt:new Date(Date.now()-3600000).toISOString(),endsAt:new Date(Date.now()+3600000).toISOString()};
+ const shift=(await call('/api/crew-shifts',shiftBody)).body;assert.ok(shift.id);
+ assert.equal((await call('/api/crew-shifts',{...shiftBody,driverId:crew2.id})).status,409);
+ const crew1Token=(await call('/api/auth/login',{username:'crew1',password:'crew-password-123'},false)).body.token;
+ const crew2Token=(await call('/api/auth/login',{username:'crew2',password:'crew-password-123'},false)).body.token;
+ const check={shiftId:shift.id,oxygen:true,equipment:true,cleaning:true,communications:true,crewPresent:true};
+ token=crew2Token;assert.equal((await call('/api/crew/workspace')).body.shifts.length,0);assert.equal((await call('/api/crew/checks',check)).status,403);
+ token=crew1Token;assert.equal((await call('/api/ambulances')).status,403);assert.equal((await call('/api/users')).status,403);assert.equal((await call('/api/notifications')).status,403);
+ assert.equal((await call('/api/crew/workspace')).body.shifts.length,1);
+ assert.equal((await call('/api/crew/checks',{...check,oxygen:false})).status,201);
+ token=admin;assert.equal((await call('/api/ambulances')).body[0].crew_check_passed,false);
+ token=crew1Token;assert.equal((await call('/api/crew/checks',check)).status,201);
+ token=admin;assert.equal((await call('/api/ambulances')).body[0].crew_check_passed,true);
+ await pool.query("UPDATE readiness_checks SET expires_at=NOW()-INTERVAL '1 second'");assert.equal((await call('/api/ambulances')).body[0].crew_check_passed,false);
+ token=crew1Token;await call('/api/crew/checks',check);token=admin;
+ await pool.query("UPDATE incidents SET ambulance_id=1,status='assigned' WHERE id=1");
+ assert.equal((await call('/api/incidents/1/crew',{})).body.driver_id,crew1.id);
+ await pool.query("UPDATE incidents SET updated_at=NOW()-INTERVAL '3 minutes' WHERE id=1");
+ await escalate();await escalate();assert.equal(Number((await pool.query("SELECT COUNT(*) FROM audit_events WHERE action='MISSION_ACK_OVERDUE'")).rows[0].count),1);
+ token=crew2Token;assert.equal((await call('/api/crew/workspace')).body.missions.length,0);assert.equal((await call('/api/crew/incidents/1/acknowledge',{})).status,409);assert.equal((await call('/api/crew/incidents/1/transition',{status:'en_route',notes:'wrong crew'})).status,403);
+ token=crew1Token;assert.equal((await call('/api/crew/incidents/1/transition',{status:'en_route',notes:'Not acknowledged'})).status,409);assert.equal((await call('/api/crew/incidents/1/acknowledge',{})).status,200);
+ assert.equal((await call('/api/crew/incidents/1/transition',{status:'en_route',notes:'Departing'})).status,200);
+ token=admin;assert.equal((await call(`/api/crew-shifts/${shift.id}/cancel`,{})).status,409);
+ token=crew1Token;assert.equal((await call('/api/crew/incidents/1/transition',{status:'on_scene',notes:'Arrived'})).status,200);assert.equal((await call('/api/crew/incidents/1/transition',{status:'completed',notes:'Mission complete'})).status,200);
+ token=admin;assert.equal((await call(`/api/crew-shifts/${shift.id}/cancel`,{})).status,200);assert.equal((await call('/api/ambulances')).body[0].crew_shift_id,null);
+ console.log('Experience checks passed: transaction-safe notifications, per-user reads, pagination, signed delivery, retries, lease recovery, escalation, report exports, recovery expiry/concurrency, session revocation role restrictions, crew scope, shift overlaps, checklist failures/expiry and mission acknowledgment.');
+}
+run().catch(e=>{console.error(e);process.exitCode=1;}).finally(async()=>{if(server)await new Promise(r=>server.close(r));if(receiver)await new Promise(r=>receiver.close(r));if(created){await pool.query('SET search_path TO public');await pool.query(`DROP SCHEMA ${schema} CASCADE`);}await pool.end();});

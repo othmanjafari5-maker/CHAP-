@@ -1,4 +1,4 @@
-# CHAP — Ambulance operational readiness
+# WAHI — Ambulance operational readiness
 
 React/Leaflet dashboard, Express/PostgreSQL API, authenticated telemetry simulator and advisory ML demonstration. Primary color: white. Secondary color: `#f54242`.
 
@@ -14,6 +14,8 @@ npm run seed
 node bootstrap.js --simulator
 npm start
 ```
+
+Run the notification worker in another terminal: `npm run worker --prefix backend` from the repository root. Production setup, HTTPS, backups, webhook delivery and recovery drills are documented in [DEPLOYMENT.md](DEPLOYMENT.md).
 
 `seed` adds only missing demo vehicles. `bootstrap` creates the first administrator only when no accounts exist. Its generated credentials are saved to ignored `backend/.initial-login` with owner-only permissions, never printed. The `--simulator` flag provisions per-vehicle credentials in ignored `simulator/devices.json`; existing device registrations are retained. Real devices are enrolled through Administration. The old shared `ADMIN_TOKEN` is no longer used.
 
@@ -33,7 +35,7 @@ From the repository root:
 node simulator/simulator.js
 ```
 
-Sign in, record real service schedules for the vehicles, and use the workspaces. Service history is never fabricated for the existing fleet. Sessions expire after eight hours and are held only in browser memory, so refreshing requires signing in again. Use TLS when deployed beyond localhost.
+Sign in, record real service schedules, create crew accounts, assign crew shifts under Dispatch, and record passed pre-dispatch checklists before assigning missions. Service history is never fabricated for the existing fleet. Sessions expire after eight hours and are held only in browser memory, so refreshing requires signing in again. Use TLS when deployed beyond localhost.
 
 ## Workspaces and roles
 
@@ -44,24 +46,30 @@ Sign in, record real service schedules for the vehicles, and use the workspaces.
 | Maintenance | Job creation, technician assignment, expected completion, job progress, service records and inspection clearance |
 | Dispatch | Incident creation, ranked recommendations, atomic vehicle assignment and mission progression |
 | Planning | Hospital coverage, configurable coverage points and conservative availability scenarios |
-| Alerts | Acknowledgment, in-app supervisor escalation and recent resolved history |
+| Alerts | Acknowledgment, supervisor escalation and recent resolved history |
+| Notifications | Per-user unread inbox, older pages and links to operational workspaces |
+| Reports | Date-filtered history, cursor pagination and CSV downloads |
+| My account | Password changes with session revocation |
+| Crew | Restricted mobile shift/checklist view, mission receipt and progression |
 | Administration | Individual accounts, roles, vehicle registration, hospital/status updates and device key rotation/revocation |
 
 - **Admin:** all actions, including account management and coverage configuration.
 - **Dispatcher:** incident creation/assignment/progression, recommendations and alert actions.
 - **Mechanic:** maintenance jobs, service records, inspection clearance and alert actions.
-- **Viewer:** read-only operational information.
+- **Viewer:** read-only operational information; can mark personal notifications read and change their own password.
+- **Crew:** only assigned current shifts and active missions, checklist submission, acknowledgment and mission progression. No organization-wide fleet/account access.
 
 Permissions are enforced by the API. Passwords use salted scrypt hashes; session and device tokens are stored hashed. Account changes revoke active sessions. The last active administrator cannot be disabled or demoted. Write attribution comes from the authenticated account, not a submitted operator name.
 
 ## Workflow rules
 
+- Crew shifts prevent overlapping driver/vehicle bookings. Dispatch requires an active crew account/shift and a fully passed checklist valid for up to 12 hours or shift end. Failed or expired checks block dispatch.
 - Assignment locks the incident and vehicle, rechecks readiness, and marks the vehicle responding. A unique active-assignment constraint prevents double assignment.
-- Missions follow open → assigned → en route → on scene → transporting/completed. Allowed cancellation paths are explicit. Completion releases the vehicle; existing inspection holds and readiness failures still prevent dispatch.
+- Assigned crews must acknowledge receipt before departure. Unacknowledged assignments escalate after two minutes when the worker is running. Missions follow open → assigned → en route → on scene → transporting/completed. Allowed cancellation paths are explicit. Completion releases the vehicle; existing inspection holds and readiness failures still prevent dispatch.
 - Starting a maintenance job marks the vehicle in maintenance and rejects vehicles on a mission. Completion requires a matching service record created since that job opened. Multiple concurrent jobs must finish before the vehicle becomes available. Cancelling an in-progress repair leaves the vehicle in maintenance for explicit administrator review.
 - Healthy readings resolve threshold alerts, but do not clear inspection holds. Clearance requires a mechanic/admin, notes, live normal telemetry, a fault scan and a service schedule.
-- Alert acknowledgment does not resolve a fault or clear a hold. Escalation records a supervisor-review flag in the inbox; it does not send an email or external notification. A severity change resets acknowledgment.
-- Activity history combines persistent audits, telemetry alerts, inspection holds/clearances and service records. Lists show the most recent 200 jobs/incidents or 300 alerts/timeline events.
+- Alert acknowledgment does not resolve a fault or clear a hold. Escalation records a supervisor-review flag and queues a notification. The worker delivers signed webhooks when configured, and escalates overdue unacknowledged critical alerts automatically. A severity change resets acknowledgment and escalation state.
+- Activity history combines persistent audits, telemetry alerts, inspection holds/clearances and service records. Operational lists show up to 200 jobs/incidents with unfinished work first, or 300 alerts/timeline events. Reports provide cursor pagination and CSV exports for historical incidents, service records and alerts.
 
 ## Intelligence and integrations
 
@@ -73,7 +81,10 @@ Road routing is supported through an optional private OSRM service configured by
 
 ## API groups
 
-- `/api/auth/login`, `/api/auth/logout`, `/api/auth/me`
+- `/api/auth/login`, `/api/auth/logout`, `/api/auth/me`, `/api/auth/password`, `/api/auth/recovery-request`, `/api/auth/recover`
+- `/api/notifications`, `/:id/read`, `/api/notification-deliveries`, `/api/system/status`
+- `/api/reports/:kind`, `/api/recovery-requests`
+- `/api/crew-shifts`, `/api/readiness-checks`, `/api/crew/workspace`, `/api/crew/checks`, `/api/crew/incidents/:id/acknowledge`, `/api/crew/incidents/:id/transition`
 - `/api/users` — account administration
 - `/api/ambulances` — fleet reads, registration and updates
 - `/api/ambulances/:id/device`, `/device/revoke` — device enrollment/revocation
@@ -93,6 +104,7 @@ All operational reads require a user session. Telemetry requires a device key ti
 ```sh
 npm test --prefix backend
 node backend/integration-check.js
+node backend/experience-check.js
 node --test simulator/simulator.test.js
 npm run build --prefix frontend
 npm run lint --prefix frontend

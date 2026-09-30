@@ -5,6 +5,7 @@ async function migrate() {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query("SELECT pg_advisory_xact_lock(87421931)");
     await client.query(fs.readFileSync(require('node:path').join(__dirname, 'schema.sql'), 'utf8'));
     await client.query('COMMIT');
   } catch (error) { await client.query('ROLLBACK'); throw error; }

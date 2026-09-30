@@ -11,3 +11,6 @@ simulator/devices.json
 __pycache__/
 ml/review-windows.csv
 ml/candidate*.json
+
+secrets/
+backups/

@@ -91,3 +91,67 @@ CREATE TABLE IF NOT EXISTS coverage_points (
  latitude NUMERIC NOT NULL CHECK(latitude BETWEEN -90 AND 90),longitude NUMERIC NOT NULL CHECK(longitude BETWEEN -180 AND 180),
  target_minutes INTEGER NOT NULL CHECK(target_minutes BETWEEN 1 AND 180)
 );
+
+-- Notifications are committed in the same transaction as the operational event.
+CREATE TABLE IF NOT EXISTS notifications (
+ id BIGSERIAL PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, kind TEXT NOT NULL,
+ title TEXT NOT NULL, ambulance_id INTEGER REFERENCES ambulances(id),
+ entity_type TEXT NOT NULL, entity_id INTEGER, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ delivery_status TEXT NOT NULL DEFAULT 'pending' CHECK(delivery_status IN ('pending','sending','delivered','failed')),
+ attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ lease_token TEXT, leased_at TIMESTAMPTZ, delivered_at TIMESTAMPTZ, last_error TEXT
+);
+CREATE INDEX IF NOT EXISTS notification_delivery_queue ON notifications(delivery_status,next_attempt_at);
+CREATE TABLE IF NOT EXISTS notification_reads (
+ notification_id BIGINT NOT NULL REFERENCES notifications(id) ON DELETE CASCADE,
+ user_id INTEGER NOT NULL REFERENCES app_users(id), read_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY(notification_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS password_recoveries (
+ id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES app_users(id),
+ requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), token_hash TEXT UNIQUE,
+ expires_at TIMESTAMPTZ, used_at TIMESTAMPTZ, issued_by INTEGER REFERENCES app_users(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS recovery_open_user ON password_recoveries(user_id) WHERE used_at IS NULL;
+CREATE TABLE IF NOT EXISTS worker_heartbeats (name TEXT PRIMARY KEY, last_seen_at TIMESTAMPTZ NOT NULL);
+CREATE OR REPLACE FUNCTION wahi_notify_event() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_TABLE_NAME = 'vehicle_alerts' THEN
+   IF TG_OP = 'INSERT' OR NEW.severity IS DISTINCT FROM OLD.severity THEN
+     INSERT INTO notifications(event_key,kind,title,ambulance_id,entity_type,entity_id)
+     VALUES ('alert:'||NEW.id||':'||NEW.severity||':'||gen_random_uuid(), 'alert', NEW.severity||': '||NEW.message, NEW.ambulance_id,'alert',NEW.id);
+   END IF;
+ ELSIF NEW.action IN ('INCIDENT_ASSIGNED','INCIDENT_STATUS_CHANGED','WORK_ORDER_CREATED','WORK_ORDER_REASSIGNED','WORK_ORDER_STATUS_CHANGED','ALERT_ESCALATE','ALERT_AUTO_ESCALATED','MISSION_ACKNOWLEDGED','READINESS_CHECK_RECORDED','MISSION_ACK_OVERDUE','MISSION_CREW_CONFIRMED') THEN
+   INSERT INTO notifications(event_key,kind,title,ambulance_id,entity_type,entity_id)
+   VALUES ('audit:'||NEW.id,lower(NEW.action),replace(initcap(lower(NEW.action)),'_',' '),NEW.ambulance_id,NEW.entity_type,NEW.entity_id);
+ END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS wahi_alert_notification ON vehicle_alerts;
+CREATE TRIGGER wahi_alert_notification AFTER INSERT OR UPDATE OF severity ON vehicle_alerts FOR EACH ROW EXECUTE FUNCTION wahi_notify_event();
+DROP TRIGGER IF EXISTS wahi_audit_notification ON audit_events;
+CREATE TRIGGER wahi_audit_notification AFTER INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION wahi_notify_event();
+
+ALTER TABLE app_users DROP CONSTRAINT IF EXISTS app_users_role_check;
+ALTER TABLE app_users ADD CONSTRAINT app_users_role_check CHECK(role IN ('admin','dispatcher','mechanic','viewer','crew'));
+CREATE TABLE IF NOT EXISTS crew_shifts (
+ id SERIAL PRIMARY KEY, ambulance_id INTEGER NOT NULL REFERENCES ambulances(id),
+ driver_id INTEGER NOT NULL REFERENCES app_users(id), clinical_crew TEXT NOT NULL,
+ starts_at TIMESTAMPTZ NOT NULL, ends_at TIMESTAMPTZ NOT NULL,
+ cancelled_at TIMESTAMPTZ, created_by INTEGER NOT NULL REFERENCES app_users(id),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), CHECK(ends_at>starts_at)
+);
+CREATE INDEX IF NOT EXISTS crew_shift_vehicle ON crew_shifts(ambulance_id,starts_at,ends_at);
+CREATE TABLE IF NOT EXISTS readiness_checks (
+ id SERIAL PRIMARY KEY, shift_id INTEGER NOT NULL REFERENCES crew_shifts(id),
+ oxygen BOOLEAN NOT NULL,equipment BOOLEAN NOT NULL,cleaning BOOLEAN NOT NULL,communications BOOLEAN NOT NULL,crew_present BOOLEAN NOT NULL,
+ notes TEXT NOT NULL DEFAULT '', checked_by INTEGER NOT NULL REFERENCES app_users(id),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS readiness_shift_latest ON readiness_checks(shift_id,created_at DESC,id DESC);
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS driver_id INTEGER REFERENCES app_users(id);
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMPTZ;
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS acknowledged_by INTEGER REFERENCES app_users(id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS incident_active_driver ON incidents(driver_id) WHERE status NOT IN ('completed','cancelled');
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS acknowledgment_escalated_at TIMESTAMPTZ;

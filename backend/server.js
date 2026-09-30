@@ -6,7 +6,9 @@ const pool = require('./db');
 const migrate = require('./migrate');
 const { numeric, alerts, assess } = require('./intelligence');
 const app = express();
-app.use(cors());
+require('./runtime').install(app);
+const allowedOrigins=(process.env.UI_ORIGIN||'http://localhost:5173,http://127.0.0.1:5173').split(',').map(v=>v.trim());
+app.use(cors({origin(origin,callback){callback(null,!origin||allowedOrigins.includes(origin));}}));
 app.use(express.json({ limit: '256kb' }));
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 function id(value) { if (!/^\d+$/.test(String(value)) || !Number.isSafeInteger(Number(value)) || Number(value) < 1) throw fail('Invalid ambulance ID'); return Number(value); }
@@ -16,16 +18,18 @@ function codes(value) { if (!Array.isArray(value) || value.length > 30 || value.
 const {identity,roles,device,authRoutes}=require('./security');
 const authorize=roles('admin','mechanic');
 authRoutes(app);
+require('./experience').publicRoutes(app);
 app.use('/api',identity,(req,res,next)=>{
   if(req.path==='/readings'||req.path==='/health')return next();
-  return roles()(req,res,next);
+  return roles()(req,res,()=>{if(req.user.role==='crew'&&!req.path.startsWith('/crew/'))return res.status(403).json({message:'Use your assigned crew workspace'});next();});
 });
 async function fleet(db = pool) {
   const result = await db.query(`SELECT a.*, vr.latitude, vr.longitude, vr.speed, vr.rpm,
     vr.engine_temperature, vr.battery_voltage, vr.fuel_level, vr.vibration, vr.recorded_at,
     vr.recorded_at AS last_update, vr.odometer_km, vr.fault_codes,
     seen.last_seen_at, m.next_service_date, m.next_service_km, h.id AS hold_id, h.reason AS hold_reason,
-    hist.history
+    hist.history,shift.id AS crew_shift_id,shift.driver_id,shift.ends_at AS crew_shift_ends_at,checklist.id AS readiness_check_id,
+    (checklist.oxygen AND checklist.equipment AND checklist.cleaning AND checklist.communications AND checklist.crew_present AND checklist.expires_at>NOW()) AS crew_check_passed,checklist.expires_at AS readiness_check_expires_at
     FROM ambulances a
     LEFT JOIN LATERAL (SELECT * FROM vehicle_readings WHERE ambulance_id=a.id ORDER BY recorded_at DESC,id DESC LIMIT 1) vr ON true
     LEFT JOIN LATERAL (SELECT MAX(received_at) AS last_seen_at FROM vehicle_readings WHERE ambulance_id=a.id) seen ON true
@@ -33,10 +37,12 @@ async function fleet(db = pool) {
     LEFT JOIN safety_holds h ON h.ambulance_id=a.id AND h.cleared_at IS NULL
     LEFT JOIN LATERAL (SELECT json_agg(t ORDER BY t.recorded_at,t.id) AS history FROM
       (SELECT id, recorded_at,battery_voltage,engine_temperature,vibration,fault_codes FROM vehicle_readings WHERE ambulance_id=a.id ORDER BY recorded_at DESC,id DESC LIMIT 120) t) hist ON true
+    LEFT JOIN LATERAL(SELECT s.* FROM crew_shifts s JOIN app_users u ON u.id=s.driver_id AND u.active AND u.role='crew' WHERE s.ambulance_id=a.id AND s.cancelled_at IS NULL AND s.starts_at<=NOW() AND s.ends_at>NOW() AND NOT EXISTS(SELECT 1 FROM incidents i WHERE i.driver_id=s.driver_id AND i.ambulance_id<>a.id AND i.status NOT IN ('completed','cancelled')) ORDER BY s.starts_at DESC LIMIT 1) shift ON true
+    LEFT JOIN LATERAL(SELECT * FROM readiness_checks c WHERE c.shift_id=shift.id ORDER BY c.created_at DESC,c.id DESC LIMIT 1) checklist ON true
     ORDER BY a.id`);
   return result.rows.map(({ history, ...row }) => assess(row, history || []));
 }
-app.get('/', (req,res) => res.json({ message: 'CHAP Operational Readiness API' }));
+app.get('/', (req,res) => res.json({ message: 'WAHI Operational Readiness API' }));
 app.get('/api/health', async (req,res) => { await pool.query('SELECT 1'); res.json({ status:'OK', database:'Connected' }); });
 app.get('/api/ambulances', async (req,res) => res.json(await fleet()));
 app.get('/api/ambulances/:id/latest', async (req,res) => {
@@ -75,7 +81,7 @@ app.post('/api/readings', device, async (req,res) => {
         for (const a of current) {
           const old = active.rows.find(o=>o.alert_type===a.type);
           if (old) {
-            await client.query('UPDATE vehicle_alerts SET severity=$1::varchar,message=$2,sensor_value=$3,acknowledged_by=CASE WHEN severity<>$1::varchar THEN NULL ELSE acknowledged_by END,acknowledged_at=CASE WHEN severity<>$1::varchar THEN NULL ELSE acknowledged_at END WHERE id=$4',[a.severity,a.message,a.value,old.id]);
+            await client.query('UPDATE vehicle_alerts SET severity=$1::varchar,message=$2,sensor_value=$3,acknowledged_by=CASE WHEN severity<>$1::varchar THEN NULL ELSE acknowledged_by END,acknowledged_at=CASE WHEN severity<>$1::varchar THEN NULL ELSE acknowledged_at END,escalated_by=CASE WHEN severity<>$1::varchar THEN NULL ELSE escalated_by END,escalated_at=CASE WHEN severity<>$1::varchar THEN NULL ELSE escalated_at END WHERE id=$4',[a.severity,a.message,a.value,old.id]);
             if(old.severity!==a.severity)await require('./security').audit(client,null,'ALERT_SEVERITY_CHANGED','alert',old.id,ambulanceId,{from:old.severity,to:a.severity,message:a.message});
           }
           else await client.query('INSERT INTO vehicle_alerts (ambulance_id,alert_type,severity,message,sensor_value) VALUES ($1,$2,$3,$4,$5)',[ambulanceId,a.type,a.severity,a.message,a.value]);
@@ -202,6 +208,9 @@ app.post('/api/coverage-points',roles('admin'),async(req,res)=>{
   });res.status(201).json(result);
 });
 require('./workflows').install(app,fleet);
+require('./notifications').install(app);
+require('./experience').install(app);
+require('./crew').install(app);
 app.use((err,req,res,next)=>{ console.error(err.message);res.status(err.status|| (err.code==='23503'?404:err.code==='23505'?409:500)).json({message:err.status?err.message:err.code==='23503'?'Referenced record not found':err.code==='23505'?'This record already exists or the vehicle is already assigned':'Request failed; check server logs'}); });
-if(require.main===module) migrate().then(()=>app.listen(process.env.PORT||5000,()=>console.log('CHAP API ready'))).catch(e=>{console.error(e.message);process.exitCode=1;});
+if(require.main===module) migrate().then(()=>{const server=app.listen(process.env.PORT||5000,()=>console.log('WAHI API ready'));require('./runtime').shutdown(server,pool);}).catch(async e=>{console.error(e.message);process.exitCode=1;await pool.end();});
 module.exports={app,fleet};
